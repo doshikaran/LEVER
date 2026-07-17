@@ -86,7 +86,7 @@ _NETWORK_MARKERS = frozenset(
     {"aiohttp", "fetch", "http", "requests", "socket", "urllib", "websocket"}
 )
 _DB_MARKERS = frozenset(
-    {"cursor", "database", "db", "execute", "query", "redis", "sql", "sqlalchemy"}
+    {"cursor", "database", "db", "execute", "query", "redis", "sql", "sqlalchemy", "sqlite3"}
 )
 _IO_MARKERS = frozenset(
     {"file", "input", "open", "print", "read", "read_text", "write", "write_text"}
@@ -101,6 +101,7 @@ class _FunctionInfo:
     qualified_name: str
     node: Any
     source: str
+    file_path: str
     scope_depth: int
 
 
@@ -109,12 +110,14 @@ def scout(
     head_source: str,
     base_ast: Any,
     head_ast: Any,
+    base_file_path: str,
+    head_file_path: str,
 ) -> ScopedChangeSet:
     """Scope a real code change using only Tree-sitter traversal and matching."""
     base_root = _root_node(base_ast)
     head_root = _root_node(head_ast)
-    base_functions = _functions_by_name(base_root, base_source)
-    head_functions = _functions_by_name(head_root, head_source)
+    base_functions = _functions_by_name(base_root, base_source, base_file_path)
+    head_functions = _functions_by_name(head_root, head_source, head_file_path)
     changed_functions = _changed_functions(base_functions, head_functions)
     changed_nodes = [_node_ref(function) for function in changed_functions]
 
@@ -142,6 +145,7 @@ def scout(
     ledger = _dependency_ledger(entry_point, head_functions, imports)
     return ScopedChangeSet(
         entry_point=EntryPoint(
+            file=entry_point.file_path,
             fn=entry_point.qualified_name,
             signature=_signature(entry_point),
         ),
@@ -157,7 +161,11 @@ def _root_node(ast_or_root: Any) -> Any:
     return getattr(ast_or_root, "root_node", ast_or_root)
 
 
-def _functions_by_name(root: Any, source: str) -> dict[str, _FunctionInfo]:
+def _functions_by_name(
+    root: Any,
+    source: str,
+    file_path: str,
+) -> dict[str, _FunctionInfo]:
     """Index module, class, and nested functions by their qualified names."""
     functions: dict[str, _FunctionInfo] = {}
 
@@ -176,6 +184,7 @@ def _functions_by_name(root: Any, source: str) -> dict[str, _FunctionInfo]:
                 qualified_name=qualified_name,
                 node=node,
                 source=source,
+                file_path=file_path,
                 scope_depth=len(classes) + len(functions_in_scope),
             )
             for child in node.children:
