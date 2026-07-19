@@ -103,6 +103,7 @@ def _build_prompt(
             f"{validation_error}\nReturn a corrected proposal that satisfies the contract.\n"
         )
 
+    entry_constraint = _entry_point_execution_constraint(scoped_change_set)
     return f"""\
 You are Lever's Delta Analyst. State the behavioral change and draft only the
 InteractionSpec fields thesis, domainPack, knobs, and observables. Output a JSON
@@ -124,13 +125,7 @@ Scoped head source:
 {source_head}
 ```
 
-Hero 1 execution constraint: if the selected entry point is `RateLimiter.admit`,
-the generated workload measures its aggregate admitted-request counter. Propose
-one observable with id `admitted`, a `counter` extractor named `admitted`,
-`timeseries` rendering, `overlay` comparison, and unit `requests`. To expose
-the tenant-isolation behavioral change, include the driver controls `rps` and
-`tenants`; when present in the change, include the config controls
-`limit_per_sec` and `burst` as well.
+{entry_constraint}
 
 Full InteractionSpec JSON Schema:
 {json.dumps(InteractionSpec.model_json_schema(), sort_keys=True)}
@@ -138,6 +133,30 @@ Full InteractionSpec JSON Schema:
 All five enabled domain-pack arity contracts:
 {_ARITY_CONTRACTS}{repair_instruction}
 """
+
+
+def _entry_point_execution_constraint(scoped_change_set: ScopedChangeSet) -> str:
+    """Supply registry-backed workload facts an LLM cannot infer from a signature alone."""
+    entry_point = scoped_change_set.entry_point
+    if entry_point is None:
+        return "No entry-point-specific execution constraint is available."
+    if entry_point.fn == "RateLimiter.admit":
+        return (
+            "Hero 1 execution constraint: if the selected entry point is `RateLimiter.admit`,\n"
+            "measure its aggregate admitted-request counter as `admitted` with a counter extractor, "
+            "timeseries rendering, overlay comparison, and unit `requests`. Include driver controls "
+            "`rps` and `tenants`, plus `limit_per_sec` and `burst` config controls when present."
+        )
+    if entry_point.fn == "next_delay":
+        return (
+            "Hero 2 execution constraint: for module-level `next_delay(attempt)`, choose the "
+            "`rate-limiter` pack. Propose exactly driver knobs `clients` (integer, 1–200), "
+            "`failureRate` (scalar, 0.0–1.0), and `maxRetries` (integer, 1–10). The concurrent-retry "
+            "workload must expose `p99_completion_time` through a trace extractor with event "
+            "`completion_time`, agg `p99`, timeseries rendering, overlay comparison, and unit `seconds`. "
+            "Do not bind `maxRetries` directly to `next_delay`; it controls the driver's retry budget."
+        )
+    return "No entry-point-specific execution constraint is available."
 
 
 def _validated_proposal(response: dict) -> PartialInteractionSpec:

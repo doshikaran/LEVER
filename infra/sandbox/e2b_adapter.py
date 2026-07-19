@@ -3,6 +3,7 @@
 import os
 import shlex
 from pathlib import Path
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from e2b import CommandExitException, Sandbox, SandboxNotFoundException, TimeoutException
@@ -45,10 +46,17 @@ class E2BSandboxRuntime(SandboxRuntime):
         return sandbox.sandbox_id
 
     def run_code(self, sandbox_id: str, code: str) -> dict:
-        """Run code in the retained sandbox without creating another VM."""
+        """Run code in the retained sandbox without creating another VM.
+
+        Stage the program through E2B's filesystem rather than embedding it in
+        ``python -c``.  Differential batches deliberately contain many sampled
+        points and can exceed the operating system's command-argument limit.
+        """
         sandbox = self._require_sandbox(sandbox_id)
+        program_path = f"/tmp/lever-runtime/{uuid4().hex}.py"
         try:
-            result = sandbox.commands.run(f"python3 -c {shlex.quote(code)}")
+            sandbox.files.write(program_path, code)
+            result = sandbox.commands.run(f"python3 {shlex.quote(program_path)}")
         except SandboxNotFoundException as error:
             self._raise_expired(sandbox_id, error)
         except TimeoutException as error:

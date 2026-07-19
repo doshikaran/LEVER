@@ -50,6 +50,7 @@ class EntryPointTemplate:
 
     harness_body: HarnessBodyGenerator
     reference_program: ReferenceProgramGenerator
+    symmetrically_seeded_dependency_kinds: frozenset[str] = frozenset()
 
 
 _HERO1_HARNESS_TEMPLATE = """\
@@ -218,11 +219,176 @@ OBSERVATIONS = {{observable_id: admitted for observable_id in observable_ids}}
 """
 
 
+_HERO2_SIMULATION = """\
+def _p99(values):
+    values = sorted(values)
+    return values[max(0, math.ceil(0.99 * len(values)) - 1)]
+
+
+def _simulate(entry_callable, config, seed):
+    clients = max(1, int(config.get("clients", 100)))
+    failure_rate = min(1.0, max(0.0, float(config.get("failureRate", 0.5))))
+    max_retries = max(1, int(config.get("maxRetries", 5)))
+    # Keep failure outcomes separate from full-jitter draws: both versions see
+    # the same retry outcomes, while only head consumes the jitter stream.
+    failure_rng = random.Random(f"{seed}:failure-outcomes")
+    failures = [
+        [failure_rng.random() < failure_rate for _ in range(max_retries)]
+        for _ in range(clients)
+    ]
+    # The module's random stream is the only source used by full jitter, and
+    # starts from the same seed in both A and B. Time is entirely simulated.
+    random.seed(seed)
+    events = [(0.0, client, 0) for client in range(clients)]
+    heapq.heapify(events)
+    completion_times = []
+    while events:
+        scheduled_at = events[0][0]
+        batch = []
+        while events and events[0][0] == scheduled_at:
+            batch.append(heapq.heappop(events))
+        for _, client, attempt in batch:
+            # Initial requests are not retries. Later simultaneous retries pay
+            # one deterministic simulated service slot per peer: the bounded
+            # contention model that makes the fixed-backoff herd observable.
+            contention = 0.0 if attempt == 0 else float(len(batch) - 1)
+            now = scheduled_at + contention
+            if failures[client][attempt] and attempt + 1 < max_retries:
+                heapq.heappush(events, (now + entry_callable(attempt), client, attempt + 1))
+            else:
+                completion_times.append(now)
+    return _p99(completion_times)
+"""
+
+
+_HERO2_HARNESS_TEMPLATE = """\
+import heapq
+import importlib.util
+import json
+import math
+import os
+import random
+import sys
+
+MODULE_PATH = __MODULE_PATH__
+ENTRY_POINT = __ENTRY_POINT__
+DEFAULT_CONFIG = __DEFAULT_CONFIG__
+STUB_CONFIG = __STUB_CONFIG__
+OBSERVABLES = __OBSERVABLES__
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location("lever_target", MODULE_PATH)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot import target module from {MODULE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+__SIMULATION__
+
+
+def run(config=None, seed=0):
+    config = dict(DEFAULT_CONFIG if config is None else config)
+    module = _load_module()
+    entry_callable = module
+    for part in ENTRY_POINT.split("."):
+        entry_callable = getattr(entry_callable, part)
+    entry_code = getattr(entry_callable, "__code__", None)
+    target_module_path = os.path.abspath(MODULE_PATH)
+    executed_lines = set()
+    entry_lines = set()
+    line_hits = {}
+
+    def trace_lines(frame, event, _arg):
+        if event == "line" and os.path.abspath(frame.f_code.co_filename) == target_module_path:
+            executed_lines.add(frame.f_lineno)
+            line_hits[frame.f_lineno] = line_hits.get(frame.f_lineno, 0) + 1
+            if entry_code is not None and frame.f_code is entry_code:
+                entry_lines.add(frame.f_lineno)
+        return trace_lines
+
+    previous_trace = sys.gettrace()
+    sys.settrace(trace_lines)
+    try:
+        p99_completion_time = _simulate(entry_callable, config, seed)
+    finally:
+        sys.settrace(previous_trace)
+
+    return {
+        "entry_point": ENTRY_POINT,
+        "driver": {key: config[key] for key in sorted(config)},
+        "observations": {
+            observable["id"]: p99_completion_time for observable in OBSERVABLES
+        },
+        "stub_config": STUB_CONFIG,
+        "trace": {
+            "file": MODULE_PATH,
+            "executed_lines": sorted(executed_lines),
+            "entry_lines": sorted(entry_lines),
+            "line_hits": {str(line): line_hits[line] for line in sorted(line_hits)},
+        },
+    }
+
+
+if __name__ == "__main__":
+    print(json.dumps(run(), sort_keys=True))
+"""
+
+
+def _hero2_harness_body(request: HarnessBodyRequest) -> str:
+    """Render the seeded concurrent-retry driver for module-level ``next_delay``."""
+    replacements = {
+        "__ENTRY_POINT__": json.dumps(request.entry_point_fn),
+        "__DEFAULT_CONFIG__": repr(request.default_config),
+        "__STUB_CONFIG__": repr(request.stub_config),
+        "__OBSERVABLES__": repr(request.observables),
+        "__SIMULATION__": _HERO2_SIMULATION,
+    }
+    source = _HERO2_HARNESS_TEMPLATE.replace("__MODULE_PATH__", json.dumps(request.module_path))
+    for token, value in replacements.items():
+        source = source.replace(token, value)
+    return source
+
+
+def _hero2_reference_program(request: ReferenceProgramRequest) -> str:
+    """Run Hero 2's module-level ``next_delay`` directly with the same seeded driver."""
+    defaults = {knob.id: knob.default for knob in request.knobs}
+    observable_ids = [observable.id for observable in request.observables]
+    return f"""\
+import heapq
+import importlib.util
+import json
+import math
+import random
+
+config = dict({defaults!r})
+config.update(json.loads({json.dumps(json.dumps(request.point))}))
+observable_ids = json.loads({json.dumps(json.dumps(observable_ids))})
+spec = importlib.util.spec_from_file_location("lever_reference", {request.module_path!r})
+if spec is None or spec.loader is None:
+    raise ImportError("Cannot import reference module")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+{_HERO2_SIMULATION}
+
+p99_completion_time = _simulate(module.next_delay, config, {json.dumps(request.seed)})
+OBSERVATIONS = {{observable_id: p99_completion_time for observable_id in observable_ids}}
+"""
+
+
 ENTRY_POINT_REGISTRY: Mapping[str, EntryPointTemplate] = MappingProxyType(
     {
         "RateLimiter.admit": EntryPointTemplate(
             harness_body=_hero1_harness_body,
             reference_program=_hero1_reference_program,
+        ),
+        "next_delay": EntryPointTemplate(
+            harness_body=_hero2_harness_body,
+            reference_program=_hero2_reference_program,
+            symmetrically_seeded_dependency_kinds=frozenset({"random"}),
         ),
     }
 )

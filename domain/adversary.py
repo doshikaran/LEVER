@@ -567,9 +567,17 @@ def _caption(bundle: ObservationBundle, observables: list[Observable]) -> str:
     base = bundle.base[observable.id]
     head = bundle.head[observable.id]
     if isinstance(base, (int, float)) and isinstance(head, (int, float)):
+        if observable.id == "admitted":
+            if base == 0:
+                return f"Head admits {head:g} more requests than base ({head:g} vs 0)."
+            return f"Head admits {head / base:.1f}× as many requests ({head:g} vs {base:g})."
         if base == 0:
-            return f"Head admits {head:g} more requests than base ({head:g} vs 0)."
-        return f"Head admits {head / base:.1f}× as many requests ({head:g} vs {base:g})."
+            return f"Head {observable.label}: {head:g} versus base 0."
+        if head == 0:
+            return f"Base {observable.label}: {base:g} versus head 0."
+        if base > head:
+            return f"Base {observable.label} is {base / head:.1f}× head ({base:g} vs {head:g})."
+        return f"Head {observable.label} is {head / base:.1f}× base ({head:g} vs {base:g})."
     return f"{observable.label}: base={base!r}, head={head!r}."
 
 

@@ -152,7 +152,14 @@ def build_harness_pair(
     template = get_entry_point_template(entry_point.fn)
     if template is None:
         raise NoHarnessTemplateRegistered(entry_point.fn)
-    stubs = tuple(_dependency_stub(entry) for entry in scoped_change_set.dependency_ledger.entries if entry.kind != "pure")
+    stubs = tuple(
+        _dependency_stub(entry)
+        for entry in scoped_change_set.dependency_ledger.entries
+        if (
+            entry.kind != "pure"
+            and entry.kind not in template.symmetrically_seeded_dependency_kinds
+        )
+    )
     driver = _workload_driver(knobs)
     config_knobs = _config_knobs(knobs)
     defaults = _default_config(knobs)

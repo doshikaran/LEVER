@@ -15,6 +15,13 @@ class _MissingSandboxCommands:
         raise SandboxNotFoundException("Sandbox sandbox-123 not found")
 
 
+class _Files:
+    """Minimal file transport stand-in used before command execution."""
+
+    def write(self, path: str, data: str) -> None:
+        return None
+
+
 class _FailingCommands:
     """Simulates a nonzero guest process result from an otherwise-live sandbox."""
 
@@ -26,7 +33,7 @@ def test_run_code_wraps_an_expired_sandbox_in_a_named_error() -> None:
     """A stale retained E2B handle never leaks an SDK-specific stack trace."""
     runtime = object.__new__(E2BSandboxRuntime)
     runtime._sandboxes = {
-        "sandbox-123": SimpleNamespace(commands=_MissingSandboxCommands())
+        "sandbox-123": SimpleNamespace(commands=_MissingSandboxCommands(), files=_Files())
     }
 
     with pytest.raises(
@@ -42,7 +49,9 @@ def test_run_code_wraps_an_expired_sandbox_in_a_named_error() -> None:
 def test_run_code_returns_a_nonzero_guest_result_using_the_port_shape() -> None:
     """A guest failure remains an ordinary stdout/stderr/exit-code response."""
     runtime = object.__new__(E2BSandboxRuntime)
-    runtime._sandboxes = {"sandbox-123": SimpleNamespace(commands=_FailingCommands())}
+    runtime._sandboxes = {
+        "sandbox-123": SimpleNamespace(commands=_FailingCommands(), files=_Files())
+    }
 
     assert runtime.run_code("sandbox-123", "raise SystemExit(7)") == {
         "stdout": "guest stdout",

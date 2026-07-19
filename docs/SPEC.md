@@ -131,7 +131,7 @@ type NamedPosition = {
 type SurpriseMarker = {
   position: KnobPosition;
   divergence: number;                  // normalized D(x), 0..1
-  caption: string;                     // "new admits 2.1× more than old"
+  caption: string;                     // "new admits N× more than old"
 };
 
 type FidelityReport = {
@@ -164,7 +164,7 @@ type Provenance = {
 
 **The preset-label rule (permanent):** a preset label **may describe what was measured** and **must never assert what it means in the world.**
 
-- ✅ *"340 rps, 3 tenants — 2.1× divergence"* — earned by measurement
+- ✅ *"340 rps, 3 tenants — measured divergence"* — earned by measurement
 - ❌ *"Black Friday traffic"* — invented
 
 Lever can prove what happens at 340 rps. It cannot prove that 340 rps *is* Black Friday. That is a claim about the world with no evidence behind it, and attaching it to a verified position lends it the verified badge's authority. `surpriseMarker` is already a named position whose name is earned; `presets` generalizes that mechanism and inherits its discipline.
@@ -343,7 +343,7 @@ The Symmetrist protects the harness. The differential test protects the semantic
 **The rules:**
 
 1. **Y-axis is zero-anchored by default** on every render with a continuous numeric axis (`timeseries`, `scalar`, `histogram`). No automatic scaling to a divergence region, ever. *(Not applicable to `matrixCell`, `nodeState`, `pathTrace` — categorical renders have no scale to truncate.)*
-2. **The divergence magnitude is always displayed as a number** alongside any chart — `surpriseMarker.divergence`, rendered in the pack's own units (*"2.1× more"*, *"8× p99 spike"*, *"1 of 12 cells flipped"*, *"3 of 7 predicates diverged"*). **Never implied by visual scale alone.** The number is the evidence; the chart is the illustration.
+2. **The divergence magnitude is always displayed as a number** alongside any chart — `surpriseMarker.divergence`, rendered in the pack's own units (*"N× more"*, *"8× p99 spike"*, *"1 of 12 cells flipped"*, *"3 of 7 predicates diverged"*). **Never implied by visual scale alone.** The number is the evidence; the chart is the illustration.
 3. **Zoom is a manual, explicitly-labeled user action only** — a `zoom to the difference` control. Never automatic, never silent. The user must know when they have left the honest frame.
 
 Rule 2 applies to all five packs. Rules 1 and 3 apply wherever there is a scale.
@@ -601,17 +601,17 @@ Rule 2 applies to all five packs. Rules 1 and 3 apply wherever there is a scale.
 
 **Why chosen:** rate limiters are the canonical shape — everyone reads a throughput curve instantly, and the divergence is large, monotone-ish, and therefore reliably renderable. Deps are `clock` only → one stub → tight Assayer variance → high confidence band.
 
-**The surprise marker:** `rps=340, tenants=3, burst=50`. The old fixed-window flattens hard at the configured limit; the new sliding-window **admits ~2.1× more**, because the burst allowance isn't decremented per-tenant on the sliding path. Caption: *"new admits 2.1× more than old"* — rendered as a number per §0.7, on a zero-anchored axis. Clicking the divergence point escape-hatches to `admission.py:84` — the missing per-tenant decrement. **This is a real bug, found by dragging, in code nobody read.** It is the demo.
+**The surprise marker:** At high tenant counts, the old version admits only up to the configured limit in one shared global window, regardless of how many tenants make requests. The new version gives each tenant an isolated window, so it can admit up to `limit × tenants`; the surprise marker is the large gap that isolation creates, not the burst path. The shared burst pool has a minor inverted effect in the observed implementation — it suppresses head admissions relative to its intended per-tenant behavior rather than inflating them. Caption: *"new admits about 20× more than old"* — rendered as a number per §0.7, on a zero-anchored axis. Clicking the divergence point escape-hatches to the tenant-window admission check. **This is a real bug, found by dragging, in code nobody read.** It is the demo.
 
 ### Hero 2 — Retry backoff: exponential → exponential with full jitter
 
 **The change:** `next_delay(attempt)` goes from `base * 2**attempt` to `random.uniform(0, base * 2**attempt)`. ~8 lines. The driver simulates 100 concurrent clients.
 
 **Domain pack:** `rate-limiter` (timeseries grammar).
-**Knobs:** `clients` (driver, 1–200), `failureRate` (driver, 0.0–1.0), `maxRetries` (argument, 1–10).
+**Knobs:** `clients` (driver, 1–200), `failureRate` (driver, 0.0–1.0), `maxRetries` (driver, 1–10).
 **Observable:** `p99 completion time`, timeseries, overlay.
 
-**Why chosen:** the visual is instantly legible and **counterintuitive** — the best kind of demo. Without jitter, all 100 clients retry at the same instants and self-synchronize into a thundering herd: the p99 curve is **violently spiky**, with towers at each retry boundary. With full jitter it's **smooth**. Spiky-vs-smooth needs no explanation; it lands pre-verbally. Deps are `random` and `clock`, both seeded → symmetric by construction. The concurrency is simulated *inside our own driver*, so there's no real scheduler to model → low stub uncertainty.
+**Why chosen:** the visual is instantly legible and **counterintuitive** — the best kind of demo. Without jitter, all 100 clients retry at the same instants and self-synchronize into a thundering herd: the p99 curve is **violently spiky**, with towers at each retry boundary. With full jitter it's **smooth**. Spiky-vs-smooth needs no explanation; it lands pre-verbally. The random stream is seeded symmetrically and time is simulated → no live clock or scheduler to model and no stub uncertainty.
 
 **The surprise marker:** `clients=100, failureRate=0.7, maxRetries=6`. Old p99 spikes to ~8× the new one at the third retry boundary. Caption: *"without jitter, all 100 clients retry at the same instant"* — magnitude stated numerically per §0.7.
 
@@ -642,7 +642,7 @@ Rule 2 applies to all five packs. Rules 1 and 3 apply wherever there is a scale.
 **Why this hero specifically justifies the pack:** the divergence here is **structural, not quantitative.** No curve and no matrix can express *"the code that computes your pricing never ran for this cohort."* The dimmed subtree is a fact about code that **has no rendering in any of the other four packs.** The demo line is: *"you shipped the new pricing logic, and for your entire beta cohort, the code that computes it never runs."*
 
 **None of Heroes 1–3 should be reassigned to this pack.** Honestly, per hero:
-- **Hero 1 (rate limiter):** the aha is *2.1× more throughput* — **magnitude, not route.** A tree is strictly worse.
+- **Hero 1 (rate limiter):** the aha is *about 20× more admitted throughput at high tenant counts, caused by tenant isolation* — **magnitude, not route.** A tree is strictly worse.
 - **Hero 2 (retry backoff):** the aha is *spiky vs. smooth* — **magnitude.** A tree is strictly worse.
 - **Hero 3 (permission):** the genuine near-miss, since inheritance *is* a cascade. But the matrix answers *"what changed"* — one cell flips red→green, legible pre-verbally in a 3-minute video — and the tree answers *"why."* The **escape hatch to code (§1.8) already serves "why."** Matrix stays.
 
