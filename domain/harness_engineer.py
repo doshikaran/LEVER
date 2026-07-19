@@ -10,6 +10,7 @@ from domain.schema import DepEntry, Knob, Observable, PartialInteractionSpec, Sc
 
 _MINIMAL_STUB_KINDS = frozenset({"network", "db", "native"})
 _HERO1_ENTRY_POINT = "RateLimiter.admit"
+_LIVE_IDENTITY_MARKERS = frozenset({"auth0", "identity", "idp", "oauth", "saml"})
 
 _HARNESS_TEMPLATE = """\
 import importlib.util
@@ -194,6 +195,20 @@ def build_harness_pair(
     entry_point = scoped_change_set.entry_point
     if entry_point is None:
         raise ValueError("Harness Engineer requires a scoped entry point")
+    unstubbable = next(
+        (
+            entry.name
+            for entry in scoped_change_set.dependency_ledger.entries
+            if entry.kind == "network"
+            and any(marker in entry.name.lower() for marker in _LIVE_IDENTITY_MARKERS)
+        ),
+        None,
+    )
+    if unstubbable is not None:
+        raise ValueError(
+            f"Cannot safely stub live identity-provider dependency `{unstubbable}`; "
+            "the generated substitute would change authentication behavior"
+        )
     if entry_point.fn != _HERO1_ENTRY_POINT:
         raise NotImplementedError(
             f"No Python harness template is available for {entry_point.fn}; "

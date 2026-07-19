@@ -1,0 +1,5 @@
+--- a/service.py
++++ b/service.py
+@@
+-return allow(user)
++return deny(user)

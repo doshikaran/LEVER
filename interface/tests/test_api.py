@@ -1,9 +1,16 @@
 """HTTP/WebSocket contract coverage without calling external services."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 from domain.adversary import AdversaryResult, CacheEntry, ObservationBundle
-from domain.orchestrator import DegradeResult
+from domain.orchestrator import (
+    DegradeResult,
+    GracefulDegradation,
+    InertResult,
+    SkippedResult,
+    UnscopableResult,
+)
 from domain.schema import (
     Agreement,
     Coverage,
@@ -17,6 +24,7 @@ from domain.schema import (
     SurpriseMarker,
     SymmetristSummary,
 )
+from infra.persistence.sqlite_adapter import SQLiteRepository
 from interface.api import create_app
 
 
@@ -91,6 +99,8 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
     head = tmp_path / "head.py"
     base.write_text("def rate(): return 1\n")
     head.write_text("def rate(): return 2\n")
+    reference = tmp_path / "reference.py"
+    reference.write_text("def test_reference() -> None: pass\n")
 
     def scripted_runner(
         base_path,
@@ -130,6 +140,7 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
         )
         return _spec()
 
+    repository = SQLiteRepository(tmp_path / "sessions.sqlite3")
     app = create_app(
         runtime_factory=lambda: object(),
         llm_factory=lambda model, effort: object(),
@@ -140,8 +151,14 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
         },
     )
     with TestClient(app) as client:
+        assert client.get("/diffs/not-persisted").status_code == 404
         accepted = client.post(
-            "/diffs", json={"base_file_path": str(base), "head_file_path": str(head)}
+            "/diffs",
+            json={
+                "base_file_path": str(base),
+                "head_file_path": str(head),
+                "reference_file_path": str(reference),
+            },
         )
         assert accepted.status_code == 202
         change_id = accepted.json()["changeId"]
@@ -156,6 +173,7 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
                 {"type": "evaluate", "requestId": "revisit", "position": {"rps": 4}}
             )
             revisited_evaluation = websocket.receive_json()
+        persisted = client.get(f"/diffs/{change_id}")
 
     assert [message["stage"] for message in messages[:4]] == [
         "files_touched",
@@ -165,6 +183,8 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
     ]
     final = messages[-1]
     assert final["type"] == "complete"
+    assert persisted.status_code == 200
+    assert persisted.json() == final
     assert final["widgetConfig"]["charts"][0]["yAxisZeroAnchored"] is True
     assert len(final["positionCache"]) == 1
     assert all(len(position_hash) == 64 for position_hash in final["positionCache"])
@@ -183,3 +203,132 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
         "requestId": "revisit",
         "source": "cache",
     }
+    repository.close()
+
+
+def test_hero_result_is_frozen_without_reinvoking_orchestrator(
+    tmp_path, monkeypatch
+) -> None:
+    """A pinned hero calls the real adapter's run_pipeline seam exactly once."""
+    database_path = tmp_path / "hero-sessions.sqlite3"
+    calls = 0
+
+    def spy_run_pipeline(
+        base_path,
+        head_path,
+        sandbox,
+        llm,
+        model,
+        reasoning_effort,
+        progress_callback=None,
+        adversary_callback=None,
+    ) -> InteractionSpec | DegradeResult:
+        nonlocal calls
+        calls += 1
+        assert adversary_callback is not None
+        adversary_callback(
+            AdversaryResult(
+                initial_position=KnobPosition({"rps": 3}),
+                surprise_marker=SurpriseMarker(
+                    position=KnobPosition({"rps": 3}),
+                    divergence=0.5,
+                    caption="Head admits twice as many requests.",
+                ),
+                presets=(),
+                search_trace=(),
+                cache=(
+                    CacheEntry(
+                        position=KnobPosition({"rps": 3}),
+                        observations=ObservationBundle(
+                            base={"admitted": 1}, head={"admitted": 2}
+                        ),
+                    ),
+                ),
+                no_divergence=False,
+            )
+        )
+        return _spec()
+
+    monkeypatch.setattr("domain.orchestrator.run_pipeline", spy_run_pipeline)
+
+    first_repository = SQLiteRepository(database_path)
+    first_app = create_app(
+        repository=first_repository,
+        runtime_factory=lambda: object(),
+        llm_factory=lambda model, effort: object(),
+    )
+    with TestClient(first_app) as client:
+        first = client.post("/heroes/hero1/run")
+        second = client.post("/heroes/hero1/run")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+    assert first.json()["changeId"] == "hero:hero1"
+    assert calls == 1
+    first_repository.close()
+
+    restarted_repository = SQLiteRepository(database_path)
+    restarted_app = create_app(
+        repository=restarted_repository,
+        runtime_factory=lambda: object(),
+        llm_factory=lambda model, effort: object(),
+    )
+    with TestClient(restarted_app) as client:
+        after_restart = client.post("/heroes/hero1/run")
+
+    assert after_restart.status_code == 200
+    assert after_restart.json() == first.json()
+    assert calls == 1
+    restarted_repository.close()
+
+
+@pytest.mark.parametrize(
+    ("terminal_result", "expected_kind"),
+    [
+        (GracefulDegradation("Fidelity could not agree."), "degraded"),
+        (InertResult("No divergence found."), "inert"),
+        (UnscopableResult("`view` requires live framework parameter `request`"), "unscopable"),
+        (SkippedResult("formatting only"), "skipped"),
+    ],
+)
+def test_degraded_and_inert_terminal_results_are_persisted(
+    tmp_path, terminal_result: DegradeResult, expected_kind: str
+) -> None:
+    """Every non-widget terminal outcome has the same durable permalink behavior."""
+    base = tmp_path / "base.py"
+    head = tmp_path / "head.py"
+    base.write_text("def rate(): return 1\n")
+    head.write_text("def rate(): return 2\n")
+    reference = tmp_path / "reference.py"
+    reference.write_text("def test_reference() -> None: pass\n")
+    repository = SQLiteRepository(tmp_path / f"{expected_kind}.sqlite3")
+
+    def terminal_runner(*_args) -> InteractionSpec | DegradeResult:
+        return terminal_result
+
+    app = create_app(
+        repository=repository,
+        runtime_factory=lambda: object(),
+        llm_factory=lambda model, effort: object(),
+        pipeline_runner=terminal_runner,
+    )
+    with TestClient(app) as client:
+        accepted = client.post(
+            "/diffs",
+            json={
+                "base_file_path": str(base),
+                "head_file_path": str(head),
+                "reference_file_path": str(reference),
+            },
+        )
+        change_id = accepted.json()["changeId"]
+        with client.websocket_connect(f"/ws/{change_id}") as websocket:
+            terminal = websocket.receive_json()
+        persisted = client.get(f"/diffs/{change_id}")
+
+    assert terminal["type"] == expected_kind
+    assert terminal["degradeReason"] == terminal_result.reason
+    assert terminal["outcome"]["kind"] == expected_kind
+    assert persisted.json() == terminal
+    repository.close()

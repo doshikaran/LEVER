@@ -13,9 +13,13 @@ class FakeSandboxRuntime(SandboxRuntime):
     def __init__(self, scripted_results: list[dict] | None = None) -> None:
         self._sandbox_ids: set[str] = set()
         self._scripted_results = list(scripted_results or [])
+        self.created_templates: list[str] = []
+        self.run_calls: list[tuple[str, str]] = []
+        self.killed_sandbox_ids: list[str] = []
 
     def create_sandbox(self, template: str) -> str:
         """Create a local fake sandbox identifier."""
+        self.created_templates.append(template)
         sandbox_id = f"fake-{uuid4()}"
         self._sandbox_ids.add(sandbox_id)
         return sandbox_id
@@ -24,6 +28,7 @@ class FakeSandboxRuntime(SandboxRuntime):
         """Execute Python code locally and return its captured result."""
         if sandbox_id not in self._sandbox_ids:
             raise KeyError(f"Unknown sandbox: {sandbox_id}")
+        self.run_calls.append((sandbox_id, code))
         if self._scripted_results:
             return self._scripted_results.pop(0)
 
@@ -41,4 +46,5 @@ class FakeSandboxRuntime(SandboxRuntime):
 
     def kill_sandbox(self, sandbox_id: str) -> None:
         """Remove a local fake sandbox identifier."""
+        self.killed_sandbox_ids.append(sandbox_id)
         self._sandbox_ids.discard(sandbox_id)

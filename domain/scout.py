@@ -83,7 +83,7 @@ _LIVE_TYPE_MARKERS = frozenset(
 _CLOCK_MARKERS = frozenset({"clock", "datetime", "monotonic", "perf_counter", "sleep", "time"})
 _RANDOM_MARKERS = frozenset({"choice", "rand", "random", "secrets", "shuffle", "uuid"})
 _NETWORK_MARKERS = frozenset(
-    {"aiohttp", "fetch", "http", "requests", "socket", "urllib", "websocket"}
+    {"aiohttp", "fetch", "http", "idp", "requests", "socket", "urllib", "websocket"}
 )
 _DB_MARKERS = frozenset(
     {"cursor", "database", "db", "execute", "query", "redis", "sql", "sqlalchemy", "sqlite3"}

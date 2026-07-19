@@ -6,3 +6,6 @@ node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+data/lever-sessions.sqlite3
+data/lever-sessions.sqlite3-shm
+data/lever-sessions.sqlite3-wal

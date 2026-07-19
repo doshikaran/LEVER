@@ -15,8 +15,8 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.mark.skipif(
-    not os.getenv("E2B_API_KEY"),
-    reason="requires a real E2B_API_KEY",
+    not os.getenv("E2B_API_KEY") or os.getenv("RUN_E2B_INTEGRATION") != "1",
+    reason="requires E2B_API_KEY and RUN_E2B_INTEGRATION=1",
 )
 def test_e2b_adapter_reuses_one_sandbox_across_sequential_calls() -> None:
     """A sandbox-resident module written in call one remains available in calls two and three."""

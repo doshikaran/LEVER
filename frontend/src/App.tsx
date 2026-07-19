@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { HonestChart } from './components/HonestChart'
 import { KnobPanel } from './components/KnobPanel'
+import { DegradationPanel } from './components/DegradationPanel'
 import { useMicroworldStore } from './store/useMicroworldStore'
 import type {
   CompleteEvent,
+  DegradationEvent,
   EvaluationEvent,
   KnobPosition,
   ObservationBundle,
@@ -84,6 +86,10 @@ function observationCaption(observations: ObservationBundle | null, observableId
   return `Head admits ${(head / base).toFixed(1)}× as many requests (${head} vs ${base}).`
 }
 
+function isDegradationEvent(event: { type?: unknown }): event is DegradationEvent {
+  return ['skipped', 'unscopable', 'inert', 'degraded'].includes(String(event.type))
+}
+
 function App() {
   const position = useMicroworldStore((state) => state.position)
   const replacePosition = useMicroworldStore((state) => state.replacePosition)
@@ -91,6 +97,7 @@ function App() {
   const putCachedObservation = useMicroworldStore((state) => state.putCachedObservation)
   const [progress, setProgress] = useState<ProgressEvent[]>([])
   const [widget, setWidget] = useState<WidgetConfig | null>(null)
+  const [degradation, setDegradation] = useState<DegradationEvent | null>(null)
   const [observations, setObservations] = useState<ObservationBundle | null>(null)
   const [loadingKey, setLoadingKey] = useState<string | null>(null)
   const [evaluationSource, setEvaluationSource] = useState<'cache' | 'fresh' | null>(null)
@@ -149,8 +156,20 @@ function App() {
             const complete = event as CompleteEvent
             replaceCache(new Map(Object.entries(complete.positionCache)))
             replacePosition(complete.widgetConfig.initialPosition)
+            setDegradation(null)
             setWidget(complete.widgetConfig)
             setEvaluationSource(null)
+            return
+          }
+          if (isDegradationEvent(event)) {
+            setDegradation(event)
+            setWidget(null)
+            setObservations(null)
+            setLoadingKey(null)
+            setEvaluationSource(null)
+            replacePosition({})
+            replaceCache(new Map())
+            setError(null)
             return
           }
           if (event.type === 'evaluation') {
@@ -172,7 +191,7 @@ function App() {
             setError(failed.error ?? 'Position evaluation failed.')
             return
           }
-          if (event.type === 'error' || event.type === 'terminal') {
+          if (event.type === 'error') {
             const failed = event as { error?: string }
             setError(failed.error ?? 'Lever could not produce an interactive result.')
           }
@@ -192,7 +211,7 @@ function App() {
   }, [putCachedObservation, replaceCache, replacePosition])
 
   useEffect(() => {
-    if (widget === null || Object.keys(position).length === 0) return
+    if (widget === null || degradation !== null || Object.keys(position).length === 0) return
     if (dragSettleTimer.current !== undefined) {
       window.clearTimeout(dragSettleTimer.current)
     }
@@ -207,7 +226,7 @@ function App() {
         window.clearTimeout(dragSettleTimer.current)
       }
     }
-  }, [evaluatePosition, position, widget])
+  }, [degradation, evaluatePosition, position, widget])
 
   const chart = widget === null ? null : widget.charts[0]
   const values = chart ? chartValues(observations, chart.observableId) : null
@@ -219,15 +238,20 @@ function App() {
     }
     if (evaluationSource === 'cache') return 'Cache hit — no network call'
     if (widget) return 'Verified position'
+    if (degradation) return 'Analysis stopped before rendering a toy.'
     return 'Preparing analysis…'
-  }, [evaluationSource, loadingKey, widget])
+  }, [degradation, evaluationSource, loadingKey, widget])
 
   return (
     <main className="mx-auto max-w-6xl space-y-6 p-6 text-slate-950">
       <header className="space-y-2">
         <p className="text-sm font-medium text-blue-700">Lever / Hero 1</p>
         <h1 className="text-3xl font-semibold">Pull on the behavioral difference</h1>
-        <p className="max-w-3xl text-slate-700">{widget?.thesis ?? 'Preparing the verified rate-limiter comparison…'}</p>
+        <p className="max-w-3xl text-slate-700">
+          {degradation
+            ? 'Lever stopped before rendering a toy.'
+            : widget?.thesis ?? 'Preparing the verified rate-limiter comparison…'}
+        </p>
       </header>
 
       <ol aria-label="Analysis progress" className="space-y-1 text-sm text-slate-700">
@@ -236,7 +260,9 @@ function App() {
 
       {error ? <p role="alert" className="text-sm text-red-700">{error}</p> : null}
 
-      {widget && chart && values ? (
+      {degradation ? <DegradationPanel event={degradation} /> : null}
+
+      {!degradation && widget && chart && values ? (
         <section className="grid gap-8 lg:grid-cols-[18rem_minmax(0,1fr)]">
           <KnobPanel controls={widget.controls} />
           <div className="space-y-3">

@@ -64,3 +64,21 @@ export type EvaluationEvent = Readonly<{
   observations: ObservationBundle
   source: 'cache' | 'fresh'
 }>
+
+export type DivergenceReportEntry = Readonly<{
+  position: KnobPosition
+  version: 'base' | 'head' | string
+  observable: string
+  harness: unknown
+  reference: unknown
+}>
+
+/** A distinct terminal outcome; none of these may be rendered as a widget. */
+export type DegradationEvent = Readonly<{
+  type: 'skipped' | 'unscopable' | 'inert' | 'degraded'
+  changeId: string
+  degradeReason: string
+  plainExplanation: string
+  divergenceReport: readonly DivergenceReportEntry[]
+  positionCache: Record<string, ObservationBundle>
+}>

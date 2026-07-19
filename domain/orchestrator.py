@@ -4,11 +4,11 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 from domain.adversary import Adversary, AdversaryResult
 from domain.delta_analyst import DeltaAnalyst
-from domain.fidelity_verifier import FidelityVerifier
+from domain.fidelity_verifier import FidelityVerification, FidelityVerifier
 from domain.harness_engineer import HarnessEngineer
 from domain.ports import LLMClient, SandboxRuntime
 from domain.schema import InteractionSpec, Provenance
@@ -29,6 +29,8 @@ class DegradeResult:
     """A typed terminal pipeline outcome with a user-facing explanation."""
 
     reason: str
+    plain_explanation: str | None = None
+    divergence_report: tuple[dict[str, Any], ...] = ()
     kind: str = field(init=False, default="degraded")
 
 
@@ -135,8 +137,15 @@ def run_pipeline(
                         _SANDBOX_HEAD_MODULE,
                     )
                 except (NotImplementedError, ValueError) as error:
+                    if loop_a_attempt < MAX_LOOP_A_ATTEMPTS:
+                        continue
                     return GracefulDegradation(
-                        f"Harness Engineer could not produce an executable pair: {error}",
+                        "Harness Engineer could not produce an executable pair after "
+                        f"{MAX_LOOP_A_ATTEMPTS} attempts: {error}",
+                        plain_explanation=_plain_explanation(
+                            partial_spec.thesis,
+                            "the dependency boundary with a real service or a focused integration test",
+                        ),
                         loop_a_attempts=loop_a_attempt,
                     )
                 emit_progress(
@@ -160,12 +169,22 @@ def run_pipeline(
                     return GracefulDegradation(
                         report.degradeReason
                         or "Fidelity confidence is too low to render a microworld.",
+                        plain_explanation=_plain_explanation(
+                            partial_spec.thesis,
+                            f"{scoped_change_set.entry_point.fn} with production-like dependency values",
+                        ),
+                        divergence_report=_divergence_report(fidelity),
                         loop_a_attempts=loop_a_attempt,
                     )
                 break
             else:
                 return GracefulDegradation(
-                    "Fidelity did not pass Symmetrist/agreement after all three Harness Engineer attempts.",
+                    "Fidelity agreement stayed below 0.85 after all three Harness Engineer attempts.",
+                    plain_explanation=_plain_explanation(
+                        partial_spec.thesis,
+                        f"{scoped_change_set.entry_point.fn} at the sampled inputs below",
+                    ),
+                    divergence_report=_divergence_report(fidelity),
                     loop_a_attempts=MAX_LOOP_A_ATTEMPTS,
                 )
 
@@ -184,14 +203,24 @@ def run_pipeline(
                 if loop_b_kickbacks >= MAX_LOOP_B_KICKBACKS:
                     return InertResult(
                         adversary_result.reason
-                        or "This change is behaviorally inert under the inputs I could model."
+                        or "This change is behaviorally inert under the inputs I could model.",
+                        plain_explanation=_plain_explanation(
+                            partial_spec.thesis,
+                            f"{scoped_change_set.entry_point.fn} at the boundary condition you care about",
+                        ),
                     )
                 # LOOP B: re-enter Delta Analyst, then re-run downstream work with its new spec.
                 loop_b_kickbacks += 1
                 continue
 
             if adversary_result.initial_position is None:
-                return InertResult("Adversary found no usable initial position.")
+                return InertResult(
+                    "Adversary found no usable initial position.",
+                    plain_explanation=_plain_explanation(
+                        partial_spec.thesis,
+                        f"{scoped_change_set.entry_point.fn} with a representative production input",
+                    ),
+                )
             interaction_spec = InteractionSpec(
                 specVersion="2.0",
                 changeId=_change_id(base_source, head_source, scoped_change_set.entry_point.fn),
@@ -233,6 +262,30 @@ def _emit_progress(
     except Exception:
         # Progress delivery must never fabricate or abort the verified pipeline.
         return
+
+
+def _plain_explanation(thesis: str, manual_input: str) -> str:
+    """Turn the scoped Delta Analyst thesis into the honest no-toy fallback copy."""
+    return (
+        f"{thesis} Rather than render a model that could mislead you, manually test "
+        f"{manual_input}."
+    )
+
+
+def _divergence_report(verification: FidelityVerification | None) -> tuple[dict[str, Any], ...]:
+    """Expose the concrete sampled harness/reference disagreements for the fallback UI."""
+    if verification is None:
+        return ()
+    return tuple(
+        {
+            "position": mismatch.point,
+            "version": mismatch.version,
+            "observable": mismatch.observable_id,
+            "harness": mismatch.harness_value,
+            "reference": mismatch.reference_value,
+        }
+        for mismatch in verification.mismatches
+    )
 
 
 def _change_id(base_source: str, head_source: str, scope_id: str) -> str:

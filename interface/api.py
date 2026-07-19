@@ -1,4 +1,4 @@
-"""In-memory HTTP/WebSocket adapter for asynchronously running Lever analyses."""
+"""HTTP/WebSocket adapter for asynchronous analyses with a durable session ledger."""
 
 import asyncio
 import hashlib
@@ -11,22 +11,34 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from domain import orchestrator
 from domain.adversary import AdversaryResult, CacheEntry
 from domain.harness_engineer import HarnessEngineer
-from domain.orchestrator import DegradeResult, run_pipeline
-from domain.ports import LLMClient, SandboxRuntime
+from domain.orchestrator import DegradeResult, GracefulDegradation
+from domain.ports import LLMClient, Repository, SandboxRuntime
 from domain.schema import InteractionSpec, KnobPosition, KnobValue, PartialInteractionSpec
 from domain.scout import scout
 from domain.synthesizer import synthesize
 from infra.llm.openai_adapter import OpenAIAdapter
 from infra.parsing.tree_sitter_adapter import TreeSitterPythonParser
+from infra.persistence.sqlite_adapter import SQLiteRepository
 from infra.sandbox.e2b_adapter import E2BSandboxRuntime
 
 
 DEFAULT_MODEL = os.getenv("LEVER_MODEL", "gpt-5.6-sol")
 DEFAULT_REASONING_EFFORT = os.getenv("LEVER_REASONING_EFFORT", "high")
+DEFAULT_SESSION_DATABASE_PATH = Path(
+    os.getenv("LEVER_SESSION_DATABASE", "data/lever-sessions.sqlite3")
+)
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+HERO_FIXTURES: dict[str, tuple[Path, Path]] = {
+    "hero1": (
+        _PROJECT_ROOT / "fixtures/hero1/base.py",
+        _PROJECT_ROOT / "fixtures/hero1/head.py",
+    ),
+}
 
 ProgressCallback = Callable[[str, str], None]
 AdversaryCallback = Callable[[AdversaryResult], None]
@@ -44,6 +56,13 @@ class DiffRequest(BaseModel):
 
     base_file_path: str
     head_file_path: str
+    reference_file_path: str | None = None
+
+
+class RawDiffRequest(BaseModel):
+    """A context-free raw diff that must degrade before static analysis begins."""
+
+    diff: str = Field(min_length=1)
 
 
 class DiffAccepted(BaseModel):
@@ -81,13 +100,7 @@ class _RunState:
 
     def set_adversary_result(self, result: AdversaryResult) -> None:
         """Store every retained KnobPosition → ObservationBundle for client lookup."""
-        self.position_cache = {
-            _position_key(entry): {
-                "base": entry.observations.base,
-                "head": entry.observations.head,
-            }
-            for entry in result.cache
-        }
+        self.position_cache = _cache_from_adversary(result)
 
     def finish(self, payload: dict[str, Any]) -> None:
         """Record the one terminal message and wake every waiting websocket."""
@@ -102,6 +115,8 @@ def create_app(
     llm_factory: Callable[[str, str], LLMClient] | None = None,
     pipeline_runner: PipelineRunner | None = None,
     evaluation_runner: EvaluationRunner | None = None,
+    repository: Repository | None = None,
+    database_path: str | Path | None = None,
     model: str = DEFAULT_MODEL,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
 ) -> FastAPI:
@@ -110,6 +125,7 @@ def create_app(
     llm_factory = llm_factory or _openai_client
     pipeline_runner = pipeline_runner or _run_pipeline_with_callbacks
     evaluation_runner = evaluation_runner or _evaluate_position
+    repository = repository or SQLiteRepository(database_path or DEFAULT_SESSION_DATABASE_PATH)
     app = FastAPI(title="Lever interface")
     app.add_middleware(
         CORSMiddleware,
@@ -119,6 +135,7 @@ def create_app(
     )
     runs: dict[str, _RunState] = {}
     app.state.runs = runs
+    app.state.repository = repository
 
     @app.post("/diffs", response_model=DiffAccepted, status_code=status.HTTP_202_ACCEPTED)
     async def create_diff(request: DiffRequest) -> DiffAccepted:
@@ -133,20 +150,103 @@ def create_app(
                 head_path=head_path,
             )
             runs[change_id] = state
-            state.task = asyncio.create_task(
-                _run_in_background(
+            if _executable_reference_path(request, base_path, head_path) is None:
+                _persist_terminal(
                     state,
-                    base_path,
-                    head_path,
-                    runtime_factory,
-                    llm_factory,
-                    pipeline_runner,
-                    model,
-                    reasoning_effort,
+                    repository,
+                    _terminal_payload(
+                        change_id,
+                        GracefulDegradation(
+                            "No executable reference path or test suite was found; Lever "
+                            "cannot independently compare harness output to real behavior.",
+                            plain_explanation=(
+                                "The repository has no executable reference for this behavior. "
+                                "Manually test the changed path in its owning application before "
+                                "trusting any comparison."
+                            ),
+                        ),
+                        {},
+                    ),
+                )
+            else:
+                state.task = asyncio.create_task(
+                    _run_in_background(
+                        state,
+                        base_path,
+                        head_path,
+                        runtime_factory,
+                        llm_factory,
+                        pipeline_runner,
+                        repository,
+                        model,
+                        reasoning_effort,
+                    ),
+                    name=f"lever-pipeline-{change_id[:12]}",
+                )
+        return DiffAccepted(changeId=change_id)
+
+    @app.post("/diffs/raw", response_model=DiffAccepted, status_code=status.HTTP_202_ACCEPTED)
+    async def create_raw_diff(request: RawDiffRequest) -> DiffAccepted:
+        """Persist the required no-repository-context degradation without running a pipeline."""
+        change_id = _raw_diff_change_id(request.diff)
+        if change_id not in runs:
+            state = _RunState(
+                change_id=change_id,
+                base_path=Path("<raw-diff>"),
+                head_path=Path("<raw-diff>"),
+            )
+            runs[change_id] = state
+            _persist_terminal(
+                state,
+                repository,
+                _terminal_payload(
+                    change_id,
+                    GracefulDegradation(
+                        "No repository context — cannot verify a raw diff against an executable "
+                        "reference path.",
+                        plain_explanation=(
+                            "This diff may change runtime behavior, but without a repository Lever "
+                            "cannot inspect dependencies or run the real code. Manually test the "
+                            "changed branch in its application."
+                        ),
+                    ),
+                    {},
                 ),
-                name=f"lever-pipeline-{change_id[:12]}",
             )
         return DiffAccepted(changeId=change_id)
+
+    @app.get("/diffs/{change_id}")
+    async def get_diff(change_id: str) -> dict[str, Any]:
+        """Return one persisted terminal result without recreating its pipeline run."""
+        persisted = repository.load(change_id)
+        if persisted is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown changeId.")
+        return persisted
+
+    @app.post("/heroes/{hero_id}/run")
+    async def run_hero(hero_id: str, force: bool = False) -> dict[str, Any]:
+        """Return a frozen hero result, regenerating only for its first or forced run."""
+        fixture_paths = HERO_FIXTURES.get(hero_id)
+        if fixture_paths is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown heroId.")
+        hero_key = f"hero:{hero_id}"
+        if not force:
+            frozen = repository.load(hero_key)
+            if frozen is not None:
+                return frozen
+
+        payload = await asyncio.to_thread(
+            _run_hero_pipeline,
+            hero_key,
+            fixture_paths,
+            runtime_factory,
+            llm_factory,
+            pipeline_runner,
+            model,
+            reasoning_effort,
+        )
+        repository.save(hero_key, payload)
+        return payload
 
     @app.websocket("/ws/{change_id}")
     async def diff_events(websocket: WebSocket, change_id: str) -> None:
@@ -189,6 +289,7 @@ async def _run_in_background(
     runtime_factory: Callable[[], SandboxRuntime],
     llm_factory: Callable[[str, str], LLMClient],
     pipeline_runner: PipelineRunner,
+    repository: Repository,
     model: str,
     reasoning_effort: str,
 ) -> None:
@@ -216,35 +317,114 @@ async def _run_in_background(
     try:
         result = await asyncio.to_thread(invoke)
     except Exception as error:
-        state.finish(
+        _persist_terminal(
+            state,
+            repository,
             {
                 "type": "error",
                 "changeId": state.change_id,
                 "error": f"{type(error).__name__}: {error}",
-            }
+            },
         )
         return
 
     if isinstance(result, InteractionSpec):
         state.spec = result
-        state.finish(
-            {
-                "type": "complete",
-                "changeId": state.change_id,
-                "widgetConfig": synthesize(result).model_dump(mode="json"),
-                "positionCache": state.position_cache,
-            }
+        _persist_terminal(
+            state,
+            repository,
+            _terminal_payload(state.change_id, result, state.position_cache),
         )
         return
 
-    state.finish(
-        {
-            "type": "terminal",
-            "changeId": state.change_id,
-            "outcome": asdict(result),
-            "positionCache": state.position_cache,
-        }
+    _persist_terminal(
+        state,
+        repository,
+        _terminal_payload(state.change_id, result, state.position_cache),
     )
+
+
+def _persist_terminal(
+    state: _RunState, repository: Repository, payload: dict[str, Any]
+) -> None:
+    """Durably write the permalink payload before reporting it to websocket clients."""
+    repository.save(state.change_id, payload)
+    state.finish(payload)
+
+
+def _terminal_payload(
+    change_id: str,
+    result: InteractionSpec | DegradeResult,
+    position_cache: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Serialize every terminal state into one persistence and presentation payload."""
+    if isinstance(result, InteractionSpec):
+        return {
+            "type": "complete",
+            "changeId": change_id,
+            "widgetConfig": synthesize(result).model_dump(mode="json"),
+            "positionCache": position_cache,
+            "interactionSpec": result.model_dump(mode="json"),
+        }
+    return {
+        "type": result.kind,
+        "changeId": change_id,
+        "degradeReason": result.reason,
+        "plainExplanation": result.plain_explanation or _default_plain_explanation(result),
+        "divergenceReport": list(result.divergence_report),
+        "outcome": asdict(result),
+        "positionCache": position_cache,
+    }
+
+
+def _default_plain_explanation(result: DegradeResult) -> str:
+    """Supply an honest fallback when an early deterministic gate has no Delta thesis."""
+    if result.kind == "unscopable":
+        return "This change needs a live framework object, so manually test it through that framework boundary."
+    if result.kind == "skipped":
+        return "Lever found no modeled runtime behavior to simulate; review the source change directly."
+    if result.kind == "inert":
+        return "The modeled inputs did not reveal a behavioral difference; manually test the boundary case you care about."
+    return "Lever could not make a faithful model, so manually test the changed path in the real application."
+
+
+def _cache_from_adversary(result: AdversaryResult) -> dict[str, dict[str, Any]]:
+    """Convert the retained search cache into the JSON payload served to clients."""
+    return {
+        _position_key(entry): {
+            "base": entry.observations.base,
+            "head": entry.observations.head,
+        }
+        for entry in result.cache
+    }
+
+
+def _run_hero_pipeline(
+    hero_key: str,
+    fixture_paths: tuple[Path, Path],
+    runtime_factory: Callable[[], SandboxRuntime],
+    llm_factory: Callable[[str, str], LLMClient],
+    pipeline_runner: PipelineRunner,
+    model: str,
+    reasoning_effort: str,
+) -> dict[str, Any]:
+    """Run one pinned hero synchronously so its first response is the frozen artifact."""
+    position_cache: dict[str, dict[str, Any]] = {}
+
+    def collect_adversary(result: AdversaryResult) -> None:
+        position_cache.update(_cache_from_adversary(result))
+
+    result = pipeline_runner(
+        str(fixture_paths[0]),
+        str(fixture_paths[1]),
+        runtime_factory(),
+        llm_factory(model, reasoning_effort),
+        model,
+        reasoning_effort,
+        lambda _stage, _message: None,
+        collect_adversary,
+    )
+    return _terminal_payload(hero_key, result, position_cache)
 
 
 async def _serve_evaluations(
@@ -322,7 +502,7 @@ def _run_pipeline_with_callbacks(
     adversary_callback: AdversaryCallback,
 ) -> InteractionSpec | DegradeResult:
     """Adapt the public orchestrator to the interface runner's callback shape."""
-    return run_pipeline(
+    return orchestrator.run_pipeline(
         base_file_path,
         head_file_path,
         sandbox,
@@ -433,6 +613,29 @@ def _validated_paths(request: DiffRequest) -> tuple[Path, Path]:
     return base_path, head_path
 
 
+def _executable_reference_path(
+    request: DiffRequest, base_path: Path, head_path: Path
+) -> Path | None:
+    """Find an explicit or conventional executable test/reference path for the diff."""
+    if request.reference_file_path is not None:
+        candidate = Path(request.reference_file_path).expanduser().resolve()
+        return candidate if candidate.is_file() else None
+
+    test_directories = {
+        base_path.parent / "tests",
+        base_path.parent.parent / "tests",
+        head_path.parent / "tests",
+        head_path.parent.parent / "tests",
+    }
+    for directory in sorted(test_directories):
+        # A repository may name its executable reference freely; a conventional
+        # ``tests/`` directory containing Python code is enough to establish a
+        # runnable independent path, rather than requiring a test_ prefix.
+        if directory.is_dir() and any(directory.glob("*.py")):
+            return directory
+    return None
+
+
 def _request_change_id(base_path: Path, head_path: Path) -> str:
     """Give the HTTP client a stable ID before Scout computes the scoped spec ID."""
     material = (
@@ -445,6 +648,11 @@ def _request_change_id(base_path: Path, head_path: Path) -> str:
         + head_path.read_bytes()
     )
     return hashlib.sha256(material).hexdigest()
+
+
+def _raw_diff_change_id(raw_diff: str) -> str:
+    """Give a context-free raw diff a stable permalink ID without pretending it is runnable."""
+    return hashlib.sha256(f"raw-diff\0{raw_diff}".encode("utf-8")).hexdigest()
 
 
 def _validated_position(
