@@ -15,7 +15,7 @@ export function DegradationPanel({ event }: DegradationPanelProps) {
   return (
     <section
       aria-labelledby="degradation-heading"
-      className="max-w-3xl space-y-5 rounded-xl border border-amber-300 bg-amber-50 p-6 text-slate-950"
+      className="max-w-3xl space-y-5 rounded-xl border-2 border-[var(--lever-warning)] bg-[var(--lever-surface)] p-6 text-[var(--lever-text)]"
       data-testid="degradation-panel"
     >
       <h2 id="degradation-heading" className="text-xl font-semibold">
@@ -27,14 +27,14 @@ export function DegradationPanel({ event }: DegradationPanelProps) {
         <div className="space-y-3">
           <button
             type="button"
-            className="font-medium text-blue-800 underline"
+            className="font-medium text-[var(--lever-warning)] underline"
             onClick={() => setShowReport((visible) => !visible)}
             aria-expanded={showReport}
           >
             {showReport ? 'Hide divergence report' : '[Show me →]'}
           </button>
           {showReport ? (
-            <div aria-label="Divergence report" className="overflow-x-auto rounded border border-amber-200 bg-white p-3">
+            <div aria-label="Divergence report" className="overflow-x-auto rounded border border-[var(--lever-warning)]/50 bg-[var(--lever-background)] p-3">
               <table className="w-full text-left text-sm">
                 <thead>
                   <tr>

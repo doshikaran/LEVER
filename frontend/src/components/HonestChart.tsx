@@ -74,10 +74,10 @@ export function HonestChart({
   }
 
   return (
-    <section aria-label={title} className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+    <section aria-label={title} className="rounded-lg border border-[var(--lever-text)]/20 bg-[var(--lever-surface)] p-4 shadow-sm">
       <header className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-base font-semibold text-slate-950">{title}</h2>
-        <p className="text-sm text-slate-700" aria-live="polite">
+        <h2 className="text-base font-semibold text-[var(--lever-text)]">{title}</h2>
+        <p className="text-sm text-[var(--lever-text)]" aria-live="polite">
           <span className="font-medium">Divergence: </span>
           <output>{divergence.toFixed(3)}</output>
         </p>
@@ -99,8 +99,15 @@ export function HonestChart({
             )}
             <Tooltip />
             <Legend />
-            <Line type="monotone" dataKey="base" name="Base" stroke="#64748b" dot={false} />
-            <Line type="monotone" dataKey="head" name="Head" stroke="#2563eb" dot={false} />
+            <Line
+              type="monotone"
+              dataKey="base"
+              name="Base"
+              stroke="var(--lever-secondary)"
+              strokeDasharray="6 4"
+              dot={false}
+            />
+            <Line type="monotone" dataKey="head" name="Head" stroke="var(--lever-primary)" dot={false} />
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -108,7 +115,7 @@ export function HonestChart({
       <button
         type="button"
         onClick={zoomToDifference}
-        className="mt-3 rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-900 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+        className="mt-3 rounded-md border border-[var(--lever-text)]/30 px-3 py-2 text-sm font-medium text-[var(--lever-text)] hover:bg-[var(--lever-background)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--lever-primary)]"
       >
         Zoom to the difference
       </button>

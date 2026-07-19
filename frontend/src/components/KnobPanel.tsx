@@ -17,15 +17,15 @@ export function KnobPanel({ controls }: KnobPanelProps) {
   const setKnob = useMicroworldStore((state) => state.setKnob)
 
   return (
-    <section aria-label="Simulation controls" className="space-y-5">
-      <h2 className="text-lg font-semibold text-slate-950">Controls</h2>
+    <section aria-label="Simulation controls" className="space-y-5 rounded-lg border border-[var(--lever-text)]/20 bg-[var(--lever-surface)] p-4 shadow-sm">
+      <h2 className="text-lg font-semibold text-[var(--lever-text)]">Controls</h2>
       {controls.map((control) => {
         const value = position[control.id] ?? control.default
         const inputId = `knob-${control.id}`
 
         if (control.type === 'boolean') {
           return (
-            <label key={control.id} className="flex items-center justify-between gap-3 text-sm text-slate-900" htmlFor={inputId}>
+            <label key={control.id} className="flex items-center justify-between gap-3 text-sm text-[var(--lever-text)]" htmlFor={inputId}>
               <span>{control.label}</span>
               <input
                 id={inputId}
@@ -41,7 +41,7 @@ export function KnobPanel({ controls }: KnobPanelProps) {
         if (control.type === 'enum' && !isNumericDomain(control.domain)) {
           return (
             <fieldset key={control.id} className="space-y-2">
-              <legend className="text-sm font-medium text-slate-900">{control.label}</legend>
+              <legend className="text-sm font-medium text-[var(--lever-text)]">{control.label}</legend>
               <div className="flex flex-wrap gap-2">
                 {control.domain.values.map((option) => (
                   <button
@@ -49,7 +49,7 @@ export function KnobPanel({ controls }: KnobPanelProps) {
                     type="button"
                     aria-pressed={value === option}
                     onClick={() => setKnob(control.id, option)}
-                    className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-900 aria-pressed:border-blue-600 aria-pressed:bg-blue-600 aria-pressed:text-white"
+                    className="rounded-md border border-[var(--lever-text)]/30 px-3 py-1.5 text-sm text-[var(--lever-text)] aria-pressed:border-[var(--lever-primary)] aria-pressed:bg-[var(--lever-primary)] aria-pressed:text-[var(--lever-surface)]"
                   >
                     {option}
                   </button>
@@ -63,9 +63,9 @@ export function KnobPanel({ controls }: KnobPanelProps) {
         const numericValue = typeof value === 'number' ? value : Number(value)
         return (
           <div key={control.id} className="space-y-2">
-            <label htmlFor={inputId} className="flex justify-between gap-3 text-sm font-medium text-slate-900">
+            <label htmlFor={inputId} className="flex justify-between gap-3 text-sm font-medium text-[var(--lever-text)]">
               <span>{control.label}</span>
-              <span className="font-normal text-slate-600">{control.unit ?? ''}</span>
+              <span className="font-normal text-[var(--lever-text)]">{control.unit ?? ''}</span>
             </label>
             <div className="flex items-center gap-3">
               <input
@@ -80,7 +80,7 @@ export function KnobPanel({ controls }: KnobPanelProps) {
               />
               <input
                 aria-label={`${control.label} numeric value`}
-                className="w-24 rounded border border-slate-300 px-2 py-1 text-right text-sm"
+                className="w-24 rounded border border-[var(--lever-text)]/30 bg-[var(--lever-surface)] px-2 py-1 text-right text-sm text-[var(--lever-text)]"
                 type="number"
                 min={control.domain.min}
                 max={control.domain.max}

@@ -317,61 +317,63 @@ function App() {
   }, [changeId, hasCurrentObservation, observedPosition])
 
   return (
-    <main className="mx-auto max-w-6xl space-y-6 p-6 text-slate-950">
-      <header className="space-y-2">
-        <p className="text-sm font-medium text-blue-700">Lever / Hero 1</p>
-        <h1 className="text-3xl font-semibold">Pull on the behavioral difference</h1>
-        <p className="max-w-3xl text-slate-700">
-          {degradation
-            ? 'Lever stopped before rendering a toy.'
-            : widget?.thesis ?? 'Preparing the verified rate-limiter comparison…'}
-        </p>
-      </header>
+    <main className="min-h-screen bg-[var(--lever-background)] px-6 py-6 text-[var(--lever-text)]">
+      <div className="mx-auto max-w-6xl space-y-6">
+        <header className="space-y-2">
+          <p className="text-sm font-medium text-[var(--lever-primary)]">Lever / Hero 1</p>
+          <h1 className="text-3xl font-semibold">Pull on the behavioral difference</h1>
+          <p className="max-w-3xl text-[var(--lever-text)]">
+            {degradation
+              ? 'Lever stopped before rendering a toy.'
+              : widget?.thesis ?? 'Preparing the verified rate-limiter comparison…'}
+          </p>
+        </header>
 
-      <ol aria-label="Analysis progress" className="space-y-1 text-sm text-slate-700">
-        {progress.map((event) => <li key={event.stage}>{event.message}</li>)}
-      </ol>
+        <ol aria-label="Analysis progress" className="space-y-1 text-sm text-[var(--lever-text)]">
+          {progress.map((event) => <li key={event.stage}>{event.message}</li>)}
+        </ol>
 
-      {error ? <p role="alert" className="text-sm text-red-700">{error}</p> : null}
+        {error ? <p role="alert" className="text-sm text-[var(--lever-warning)]">{error}</p> : null}
 
-      {degradation ? <DegradationPanel event={degradation} /> : null}
+        {degradation ? <DegradationPanel event={degradation} /> : null}
 
-      {!degradation && widget && chart && values ? (
-        <section className="grid gap-8 lg:grid-cols-[18rem_minmax(0,1fr)]">
-          <KnobPanel controls={widget.controls} />
-          <div className="space-y-3">
-            <p className="text-sm text-slate-600" aria-live="polite">{status}</p>
-            <HonestChart
-              title={chart.label}
-              divergence={values.divergence}
-              data={[{ x: 'Current position', base: values.base, head: values.head }]}
-              onPointClick={openResponsibleLine}
-            />
-            {attributionMessage ? <p role="status" className="text-sm text-slate-600">{attributionMessage}</p> : null}
-            <p aria-live="polite" className="text-base font-medium text-slate-950">
-              {caption ?? widget.surpriseMarker?.caption ?? 'Choose a cached position to inspect it.'}
-            </p>
-            <div className="flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                onClick={() => void pinCurrentPosition()}
-                disabled={!hasCurrentObservation || pinStatus === 'Writing regression test…'}
-                className="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-900 enabled:hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Pin this
-              </button>
-              {pinStatus ? <p role="status" className="text-sm text-slate-600">{pinStatus}</p> : null}
-            </div>
-            {selectedLine && selectedSourceFile ? (
-              <SourceViewer
-                responsibleLine={selectedLine}
-                sourceFile={selectedSourceFile}
-                onClose={() => setSelectedLine(null)}
+        {!degradation && widget && chart && values ? (
+          <section className="grid gap-8 lg:grid-cols-[18rem_minmax(0,1fr)]">
+            <KnobPanel controls={widget.controls} />
+            <div className="space-y-3">
+              <p className="text-sm text-[var(--lever-text)]" aria-live="polite">{status}</p>
+              <HonestChart
+                title={chart.label}
+                divergence={values.divergence}
+                data={[{ x: 'Current position', base: values.base, head: values.head }]}
+                onPointClick={openResponsibleLine}
               />
-            ) : null}
-          </div>
-        </section>
-      ) : null}
+              {attributionMessage ? <p role="status" className="text-sm text-[var(--lever-text)]">{attributionMessage}</p> : null}
+              <p aria-live="polite" className="text-base font-medium text-[var(--lever-text)]">
+                {caption ?? widget.surpriseMarker?.caption ?? 'Choose a cached position to inspect it.'}
+              </p>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void pinCurrentPosition()}
+                  disabled={!hasCurrentObservation || pinStatus === 'Writing regression test…'}
+                  className="rounded-md border border-[var(--lever-primary)] px-3 py-2 text-sm font-medium text-[var(--lever-text)] enabled:hover:bg-[var(--lever-surface)] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Pin this
+                </button>
+                {pinStatus ? <p role="status" className="text-sm text-[var(--lever-text)]">{pinStatus}</p> : null}
+              </div>
+              {selectedLine && selectedSourceFile ? (
+                <SourceViewer
+                  responsibleLine={selectedLine}
+                  sourceFile={selectedSourceFile}
+                  onClose={() => setSelectedLine(null)}
+                />
+              ) : null}
+            </div>
+          </section>
+        ) : null}
+      </div>
     </main>
   )
 }

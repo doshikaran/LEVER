@@ -9,7 +9,11 @@ from typing import Any, Callable, Literal
 from domain.adversary import Adversary, AdversaryResult
 from domain.delta_analyst import DeltaAnalyst
 from domain.fidelity_verifier import FidelityVerification, FidelityVerifier
-from domain.harness_engineer import HarnessEngineer
+from domain.harness_engineer import (
+    HarnessEngineer,
+    NO_HARNESS_TEMPLATE_REASON,
+    NoHarnessTemplateRegistered,
+)
 from domain.ports import LLMClient, SandboxRuntime
 from domain.schema import InteractionSpec, Provenance
 from domain.scout import scout
@@ -135,6 +139,15 @@ def run_pipeline(
                         partial_spec,
                         _SANDBOX_BASE_MODULE,
                         _SANDBOX_HEAD_MODULE,
+                    )
+                except NoHarnessTemplateRegistered:
+                    return GracefulDegradation(
+                        NO_HARNESS_TEMPLATE_REASON,
+                        plain_explanation=(
+                            f"Lever has no isolated harness/reference implementation for "
+                            f"{scoped_change_set.entry_point.fn} yet."
+                        ),
+                        loop_a_attempts=loop_a_attempt,
                     )
                 except (NotImplementedError, ValueError) as error:
                     if loop_a_attempt < MAX_LOOP_A_ATTEMPTS:

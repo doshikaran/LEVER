@@ -1,6 +1,7 @@
 """Deterministic coverage for Harness Engineer's symmetry and retry behavior."""
 
 from pathlib import Path
+import hashlib
 import json
 import subprocess
 import sys
@@ -11,6 +12,8 @@ from domain.harness_engineer import (
     retry_plan,
     run_retry_loop,
 )
+from domain.entry_point_registry import get_entry_point_template
+from domain.fidelity_verifier import _reference_program
 from domain.schema import (
     AstNodeRef,
     ConfigBinding,
@@ -146,7 +149,7 @@ def test_harness_engineer_declares_uncertainty_for_each_non_pure_dependency() ->
 
 
 def test_generated_hero1_harnesses_execute_the_real_fixture_modules() -> None:
-    """One template imports each real version and reports their distinct admissions."""
+    """The registry preserves Hero 1's source bytes and real-module admissions."""
     pair = HarnessEngineer().generate(
         _hero_scope(),
         _hero_spec(),
@@ -170,6 +173,24 @@ def test_generated_hero1_harnesses_execute_the_real_fixture_modules() -> None:
     assert base.returncode == head.returncode == 0
     assert json.loads(base.stdout)["observations"] == {"admitted": 5}
     assert json.loads(head.stdout)["observations"] == {"admitted": 6}
+    assert get_entry_point_template("RateLimiter.admit") is not None
+    assert hashlib.sha256(pair.harness_a.source.encode()).hexdigest() == (
+        "f20b6b9d91e7192ee1551dc7ba14514c651371ac7fe1dc6cb8763a13e1c38827"
+    )
+    assert hashlib.sha256(pair.harness_b.source.encode()).hexdigest() == (
+        "785804fd4885073d905781a8521a0e3c89e1f843c0255abfdb3d7eb902ddd898"
+    )
+    reference = _reference_program(
+        str(FIXTURE_DIR / "head.py"),
+        _hero_spec().knobs,
+        _hero_spec().observables,
+        _hero_scope(),
+        {"limit_per_sec": 5, "burst": 2, "rps": 3, "tenants": 2},
+        0,
+    )
+    assert hashlib.sha256(reference.encode()).hexdigest() == (
+        "ac14a94b4503f3c8ec3312620344aa8a32659104513627922e3b4da1d7ea19b2"
+    )
 
 
 def test_generated_harness_embeds_optional_schema_values_as_python_literals() -> None:

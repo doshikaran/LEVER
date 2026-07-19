@@ -10,12 +10,15 @@ from domain.schema import (
     Agreement,
     Coverage,
     CvStabilityEstimate,
+    DependencyLedger,
+    EntryPoint,
     FidelityReport,
     KnobPosition,
     RelativeTolerance,
     Stability,
     SurpriseMarker,
     SymmetristSummary,
+    ScopedChangeSet,
 )
 from infra.fakes.fake_llm import FakeLLMClient
 from infra.fakes.fake_sandbox import FakeSandboxRuntime
@@ -206,3 +209,33 @@ def test_loop_b_kicks_back_to_delta_analyst_once_then_recovers(monkeypatch) -> N
     assert len(harness_calls) == 2
     assert len(fake_llm.prompts) == 2
     assert not adversary_results
+
+
+def test_unregistered_entry_point_returns_graceful_degradation_without_execution(monkeypatch) -> None:
+    """Unsupported shapes stop at Harness Engineer before a harness or reference runs."""
+    unregistered_scope = ScopedChangeSet(
+        entry_point=EntryPoint(
+            file=str(FIXTURE_DIR / "head.py"),
+            fn="FutureLimiter.evaluate",
+            signature="FutureLimiter.evaluate(self, value: int) -> int",
+        ),
+        dependency_ledger=DependencyLedger(),
+    )
+    runtime = FakeSandboxRuntime()
+    llm = FakeLLMClient([_valid_response()])
+    monkeypatch.setattr(orchestrator, "scout", lambda *args: unregistered_scope)
+
+    result = orchestrator.run_pipeline(
+        str(FIXTURE_DIR / "base.py"),
+        str(FIXTURE_DIR / "head.py"),
+        runtime,
+        llm,
+        "fake-model",
+        "low",
+    )
+
+    assert isinstance(result, orchestrator.GracefulDegradation)
+    assert result.reason == "no harness template registered for this entry-point shape"
+    assert runtime.created_templates == ["base"]
+    assert len(llm.prompts) == 1
+    assert not runtime.run_calls

@@ -1,113 +1,23 @@
 """Deterministic harness planning and templating for isolated real-code execution."""
 
-import json
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
+from domain.entry_point_registry import HarnessBodyRequest, get_entry_point_template
 from domain.ports import SandboxRuntime
 from domain.schema import DepEntry, Knob, Observable, PartialInteractionSpec, ScopedChangeSet
 
 
 _MINIMAL_STUB_KINDS = frozenset({"network", "db", "native"})
-_HERO1_ENTRY_POINT = "RateLimiter.admit"
 _LIVE_IDENTITY_MARKERS = frozenset({"auth0", "identity", "idp", "oauth", "saml"})
-
-_HARNESS_TEMPLATE = """\
-import importlib.util
-import json
-import os
-import random
-import sys
-
-MODULE_PATH = __MODULE_PATH__
-ENTRY_POINT = __ENTRY_POINT__
-DEFAULT_CONFIG = __DEFAULT_CONFIG__
-CONFIG_KNOBS = __CONFIG_KNOBS__
-DRIVER_KNOBS = __DRIVER_KNOBS__
-STUB_CONFIG = __STUB_CONFIG__
-OBSERVABLES = __OBSERVABLES__
+NO_HARNESS_TEMPLATE_REASON = "no harness template registered for this entry-point shape"
 
 
-def _load_module():
-    spec = importlib.util.spec_from_file_location("lever_target", MODULE_PATH)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot import target module from {MODULE_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+class NoHarnessTemplateRegistered(ValueError):
+    """Raised only at the domain boundary when Scout's shape lacks an executable template."""
 
-
-def _values(config, knobs):
-    return {
-        knob["param"]: config.get(knob["id"], config.get(knob["param"], knob["default"]))
-        for knob in knobs
-    }
-
-
-def run(config=None, seed=0):
-    config = dict(DEFAULT_CONFIG if config is None else config)
-    random.seed(seed)
-    driver = _values(config, DRIVER_KNOBS)
-    config_values = _values(config, CONFIG_KNOBS)
-    module = _load_module()
-    limiter_class = module.RateLimiter
-    entry_callable = module
-    for part in ENTRY_POINT.split("."):
-        entry_callable = getattr(entry_callable, part)
-    entry_code = getattr(entry_callable, "__code__", None)
-    target_module_path = os.path.abspath(MODULE_PATH)
-    executed_lines = set()
-    entry_lines = set()
-    line_hits = {}
-
-    def trace_lines(frame, event, _arg):
-        if event == "line" and os.path.abspath(frame.f_code.co_filename) == target_module_path:
-            executed_lines.add(frame.f_lineno)
-            line_hits[frame.f_lineno] = line_hits.get(frame.f_lineno, 0) + 1
-            if entry_code is not None and frame.f_code is entry_code:
-                entry_lines.add(frame.f_lineno)
-        return trace_lines
-
-    previous_trace = sys.gettrace()
-    sys.settrace(trace_lines)
-    limit = int(config_values.get("limit_per_sec", 100))
-    burst = int(config_values.get("burst", 0))
-    try:
-        try:
-            limiter = limiter_class(limit_per_sec=limit, burst=burst)
-        except TypeError:
-            limiter = limiter_class(limit_per_sec=limit)
-
-        rps = max(1, int(driver.get("rps", driver.get("requests_per_tenant_per_sec", 1))))
-        tenants = max(1, int(driver.get("tenants", driver.get("tenant_count", 1))))
-        admitted = 0
-        # Hero 1 accepts ``now`` as an argument. A fixed simulated epoch makes both
-        # generated harnesses and the independent reference path deterministic.
-        started_at = 0.0
-        for request_index in range(rps):
-            now = started_at + request_index / rps
-            for tenant_index in range(tenants):
-                admitted += limiter.admit(f"tenant-{tenant_index}", now)
-    finally:
-        sys.settrace(previous_trace)
-
-    return {
-        "entry_point": ENTRY_POINT,
-        "driver": driver,
-        "observations": {observable["id"]: admitted for observable in OBSERVABLES},
-        "stub_config": STUB_CONFIG,
-        "trace": {
-            "file": MODULE_PATH,
-            "executed_lines": sorted(executed_lines),
-            "entry_lines": sorted(entry_lines),
-            "line_hits": {str(line): line_hits[line] for line in sorted(line_hits)},
-        },
-    }
-
-
-if __name__ == "__main__":
-    print(json.dumps(run(), sort_keys=True))
-"""
+    def __init__(self, entry_point_fn: str) -> None:
+        super().__init__(f"{NO_HARNESS_TEMPLATE_REASON}: {entry_point_fn}")
 
 
 @dataclass(frozen=True)
@@ -221,7 +131,7 @@ def build_harness_pair(
     base_module_path: str,
     head_module_path: str,
 ) -> HarnessPair:
-    """Build a symmetric Hero 1 harness pair from one source template."""
+    """Build a symmetric pair from the entry point's registered source template."""
     entry_point = scoped_change_set.entry_point
     if entry_point is None:
         raise ValueError("Harness Engineer requires a scoped entry point")
@@ -239,31 +149,27 @@ def build_harness_pair(
             f"Cannot safely stub live identity-provider dependency `{unstubbable}`; "
             "the generated substitute would change authentication behavior"
         )
-    if entry_point.fn != _HERO1_ENTRY_POINT:
-        raise NotImplementedError(
-            f"No Python harness template is available for {entry_point.fn}; "
-            "the current template supports Hero 1's RateLimiter.admit."
-        )
-
+    template = get_entry_point_template(entry_point.fn)
+    if template is None:
+        raise NoHarnessTemplateRegistered(entry_point.fn)
     stubs = tuple(_dependency_stub(entry) for entry in scoped_change_set.dependency_ledger.entries if entry.kind != "pure")
     driver = _workload_driver(knobs)
     config_knobs = _config_knobs(knobs)
     defaults = _default_config(knobs)
-    common_replacements = {
-        "__ENTRY_POINT__": json.dumps(entry_point.fn),
-        # These constants are embedded in *Python* source, rather than a JSON
-        # document.  ``repr`` therefore preserves Python values such as None,
-        # which an LLM is permitted to propose for optional schema fields.
-        "__DEFAULT_CONFIG__": repr(defaults),
-        "__CONFIG_KNOBS__": repr(config_knobs),
-        "__DRIVER_KNOBS__": repr(driver.knob_definitions),
-        "__STUB_CONFIG__": repr({stub.dependency: stub.as_dict() for stub in stubs}),
-        "__OBSERVABLES__": repr(
-            [observable.model_dump(mode="json") for observable in observables]
-        ),
+    shared_request = {
+        "entry_point_fn": entry_point.fn,
+        "default_config": defaults,
+        "config_knobs": config_knobs,
+        "driver_knobs": driver.knob_definitions,
+        "stub_config": {stub.dependency: stub.as_dict() for stub in stubs},
+        "observables": [observable.model_dump(mode="json") for observable in observables],
     }
-    harness_a_source = _render_harness(base_module_path, common_replacements)
-    harness_b_source = _render_harness(head_module_path, common_replacements)
+    harness_a_source = template.harness_body(
+        HarnessBodyRequest(module_path=base_module_path, **shared_request)
+    )
+    harness_b_source = template.harness_body(
+        HarnessBodyRequest(module_path=head_module_path, **shared_request)
+    )
     _assert_module_path_is_only_difference(harness_a_source, harness_b_source)
     return HarnessPair(
         harness_a=HarnessArtifact(harness_a_source, base_module_path),
@@ -370,14 +276,6 @@ def _config_knobs(knobs: list[Knob]) -> list[dict[str, Any]]:
 def _default_config(knobs: list[Knob]) -> dict[str, Any]:
     """Create the default runtime config by stable knob ID."""
     return {knob.id: knob.default for knob in knobs}
-
-
-def _render_harness(module_path: str, replacements: dict[str, str]) -> str:
-    """Render one harness, varying only its target module path."""
-    source = _HARNESS_TEMPLATE.replace("__MODULE_PATH__", json.dumps(module_path))
-    for token, value in replacements.items():
-        source = source.replace(token, value)
-    return source
 
 
 def _assert_module_path_is_only_difference(base_source: str, head_source: str) -> None:

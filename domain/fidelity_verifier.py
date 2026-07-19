@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from scipy.stats import qmc
 
+from domain.entry_point_registry import ReferenceProgramRequest, get_entry_point_template
 from domain.harness_engineer import HarnessPair
 from domain.line_attribution import trace_attribution
 from domain.ports import SandboxRuntime
@@ -472,54 +473,22 @@ def _reference_program(
 ) -> str:
     """Return the direct-real-code program with its observation kept in memory."""
     entry_point = scoped_change_set.entry_point
-    if entry_point is None or entry_point.fn != "RateLimiter.admit":
-        raise NotImplementedError("Independent real-code execution currently supports Hero 1")
-    config_knobs = [
-        {"id": knob.id, "param": knob.binding.path, "default": knob.default}
-        for knob in knobs
-        if knob.binding.kind == "config"
-    ]
-    driver_knobs = [
-        {"id": knob.id, "param": knob.binding.param, "default": knob.default}
-        for knob in knobs
-        if knob.binding.kind == "driver"
-    ]
-    observable_ids = [observable.id for observable in observables]
-    return f"""\
-import importlib.util
-import json
-import random
-
-config = json.loads({json.dumps(json.dumps(point))})
-random.seed({seed})
-config_knobs = json.loads({json.dumps(json.dumps(config_knobs))})
-driver_knobs = json.loads({json.dumps(json.dumps(driver_knobs))})
-observable_ids = json.loads({json.dumps(json.dumps(observable_ids))})
-spec = importlib.util.spec_from_file_location("lever_reference", {module_path!r})
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-
-def values(knobs):
-    return {{item["param"]: config.get(item["id"], config.get(item["param"], item["default"])) for item in knobs}}
-
-config_values = values(config_knobs)
-driver = values(driver_knobs)
-limit = int(config_values.get("limit_per_sec", 100))
-burst = int(config_values.get("burst", 0))
-try:
-    limiter = module.RateLimiter(limit_per_sec=limit, burst=burst)
-except TypeError:
-    limiter = module.RateLimiter(limit_per_sec=limit)
-rps = max(1, int(driver.get("rps", driver.get("requests_per_tenant_per_sec", 1))))
-tenants = max(1, int(driver.get("tenants", driver.get("tenant_count", 1))))
-admitted = 0
-started_at = 0.0
-for request_index in range(rps):
-    now = started_at + request_index / rps
-    for tenant_index in range(tenants):
-        admitted += limiter.admit(f"tenant-{{tenant_index}}", now)
-OBSERVATIONS = {{observable_id: admitted for observable_id in observable_ids}}
-"""
+    if entry_point is None:
+        raise ValueError("Independent reference execution requires a scoped entry point")
+    template = get_entry_point_template(entry_point.fn)
+    if template is None:
+        raise ValueError(
+            f"no harness template registered for this entry-point shape: {entry_point.fn}"
+        )
+    return template.reference_program(
+        ReferenceProgramRequest(
+            module_path=module_path,
+            knobs=knobs,
+            observables=observables,
+            point=point,
+            seed=seed,
+        )
+    )
 
 
 def _differential_bundle_command(
@@ -558,13 +527,22 @@ def _differential_suite_command(
     scoped_change_set: ScopedChangeSet,
 ) -> str:
     """Run all 128 four-way comparisons in one already-warm sandbox command."""
+    reference_programs = [
+        {
+            "base": _reference_program(
+                paths["reference_base"], knobs, observables, scoped_change_set, point, 0
+            ),
+            "head": _reference_program(
+                paths["reference_head"], knobs, observables, scoped_change_set, point, 0
+            ),
+        }
+        for point in points
+    ]
     return _suite_program(
         paths,
         points,
-        knobs,
-        [observable.id for observable in observables],
-        scoped_change_set,
         mode="differential",
+        reference_programs=reference_programs,
     )
 
 
@@ -592,9 +570,6 @@ def _assayer_suite_command(
     return _suite_program(
         paths,
         points,
-        knobs=[],
-        observable_ids=[],
-        scoped_change_set=None,
         mode="assayer",
         seed_table=seed_table,
     )
@@ -603,79 +578,49 @@ def _assayer_suite_command(
 def _suite_program(
     paths: dict[str, str],
     points: list[dict[str, Any]],
-    knobs: list[Knob],
-    observable_ids: list[str],
-    scoped_change_set: ScopedChangeSet | None,
     mode: str,
     seed_table: list[list[str]] | None = None,
+    reference_programs: list[dict[str, str]] | None = None,
 ) -> str:
     """Build a transport-efficient suite while keeping each logical call isolated."""
-    if mode == "differential":
-        if scoped_change_set is None:
-            raise ValueError("Differential suite requires an entry point")
-        config_knobs, driver_knobs = _hero1_knob_metadata(knobs, scoped_change_set)
-    else:
-        config_knobs, driver_knobs = [], []
+    if mode == "differential" and reference_programs is None:
+        raise ValueError("Differential suite requires registered reference programs")
     if seed_table is None:
         seed_table = [
             [_replicate_seed(point_index, replicate) for replicate in range(ASSAYER_REPLICATES)]
             for point_index in range(len(points))
         ]
     return f"""\
-import importlib.util
 import json
-import random
 import runpy
 
 POINTS = json.loads({json.dumps(json.dumps(points))})
 PATHS = json.loads({json.dumps(json.dumps(paths, sort_keys=True))})
-CONFIG_KNOBS = json.loads({json.dumps(json.dumps(config_knobs))})
-DRIVER_KNOBS = json.loads({json.dumps(json.dumps(driver_knobs))})
-OBSERVABLE_IDS = json.loads({json.dumps(json.dumps(observable_ids))})
+REFERENCE_PROGRAMS = json.loads({json.dumps(json.dumps(reference_programs or []))})
 SEED_TABLE = json.loads({json.dumps(json.dumps(seed_table))})
-
-def values(config, knobs):
-    return {{item["param"]: config.get(item["id"], config.get(item["param"], item["default"])) for item in knobs}}
 
 def run_harness(path, point, seed):
     namespace = runpy.run_path(path)
     return namespace["run"](point, seed)
 
-def run_reference(module_path, point, seed):
-    random.seed(seed)
-    spec = importlib.util.spec_from_file_location("lever_reference", module_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    config_values = values(point, CONFIG_KNOBS)
-    driver = values(point, DRIVER_KNOBS)
-    limit = int(config_values.get("limit_per_sec", 100))
-    burst = int(config_values.get("burst", 0))
-    try:
-        limiter = module.RateLimiter(limit_per_sec=limit, burst=burst)
-    except TypeError:
-        limiter = module.RateLimiter(limit_per_sec=limit)
-    rps = max(1, int(driver.get("rps", driver.get("requests_per_tenant_per_sec", 1))))
-    tenants = max(1, int(driver.get("tenants", driver.get("tenant_count", 1))))
-    admitted = 0
-    for request_index in range(rps):
-        now = request_index / rps
-        for tenant_index in range(tenants):
-            admitted += limiter.admit(f"tenant-{{tenant_index}}", now)
-    return {{observable_id: admitted for observable_id in OBSERVABLE_IDS}}
+def run_reference(program):
+    namespace = {{}}
+    exec(program, namespace)
+    return namespace["OBSERVATIONS"]
 
 if {mode!r} == "differential":
     output = {{"points": []}}
-    for point in POINTS:
+    for point, references in zip(POINTS, REFERENCE_PROGRAMS, strict=True):
         harness_base = run_harness(PATHS["harness_base"], point, 0)
         harness_head = run_harness(PATHS["harness_head"], point, 0)
         output["points"].append({{
             "point": point,
             "harness_base": harness_base["observations"],
             "trace_base": harness_base.get("trace"),
-            "reference_base": run_reference(PATHS["reference_base"], point, 0),
+            "reference_base": run_reference(references["base"]),
             "harness_head": harness_head["observations"],
             "trace_head": harness_head.get("trace"),
-            "reference_head": run_reference(PATHS["reference_head"], point, 0),
+            "reference_head": run_reference(references["head"]),
         }})
 else:
     output = {{"points": []}}
@@ -692,27 +637,6 @@ else:
         }})
 print(json.dumps(output, sort_keys=True))
 """
-
-
-def _hero1_knob_metadata(
-    knobs: list[Knob], scoped_change_set: ScopedChangeSet
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return only the direct-driver metadata needed by Hero 1's real-code path."""
-    entry_point = scoped_change_set.entry_point
-    if entry_point is None or entry_point.fn != "RateLimiter.admit":
-        raise NotImplementedError("Independent real-code execution currently supports Hero 1")
-    return (
-        [
-            {"id": knob.id, "param": knob.binding.path, "default": knob.default}
-            for knob in knobs
-            if knob.binding.kind == "config"
-        ],
-        [
-            {"id": knob.id, "param": knob.binding.param, "default": knob.default}
-            for knob in knobs
-            if knob.binding.kind == "driver"
-        ],
-    )
 
 
 def _bundle_program(
