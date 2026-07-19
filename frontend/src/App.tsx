@@ -27,7 +27,7 @@ const HERO_1 = {
 }
 const DRAG_SETTLE_MS = 120
 
-type PendingRequest = Readonly<{ key: string; version: number }>
+type PendingRequest = Readonly<{ key: string; version: number; position: KnobPosition }>
 
 function socketBase(apiBase: string) {
   const url = new URL(apiBase)
@@ -100,14 +100,17 @@ function App() {
   const putCachedObservation = useMicroworldStore((state) => state.putCachedObservation)
   const [progress, setProgress] = useState<ProgressEvent[]>([])
   const [widget, setWidget] = useState<WidgetConfig | null>(null)
+  const [changeId, setChangeId] = useState<string | null>(null)
   const [degradation, setDegradation] = useState<DegradationEvent | null>(null)
   const [observations, setObservations] = useState<ObservationBundle | null>(null)
+  const [observedPosition, setObservedPosition] = useState<KnobPosition | null>(null)
   const [loadingKey, setLoadingKey] = useState<string | null>(null)
   const [evaluationSource, setEvaluationSource] = useState<'cache' | 'fresh' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [sourceFiles, setSourceFiles] = useState<SourceFiles>({})
   const [selectedLine, setSelectedLine] = useState<ResponsibleLine | null>(null)
   const [attributionMessage, setAttributionMessage] = useState<string | null>(null)
+  const [pinStatus, setPinStatus] = useState<string | null>(null)
   const socket = useRef<WebSocket | null>(null)
   const pendingRequests = useRef(new Map<string, PendingRequest>())
   const positionVersion = useRef(0)
@@ -119,12 +122,14 @@ function App() {
     // source viewer the user has just opened for the current point.
     setSelectedLine(null)
     setAttributionMessage(null)
+    setPinStatus(null)
     const key = await hashPosition(nextPosition)
     if (version !== positionVersion.current) return
 
     const cacheHit = useMicroworldStore.getState().cache.get(key)
     if (cacheHit) {
       setObservations(cacheHit)
+      setObservedPosition({ ...nextPosition })
       setEvaluationSource('cache')
       setLoadingKey(null)
       return
@@ -135,7 +140,7 @@ function App() {
       return
     }
     const requestId = crypto.randomUUID()
-    pendingRequests.current.set(requestId, { key, version })
+    pendingRequests.current.set(requestId, { key, version, position: { ...nextPosition } })
     setLoadingKey(key)
     socket.current.send(JSON.stringify({ type: 'evaluate', requestId, position: nextPosition }))
   }, [])
@@ -169,21 +174,27 @@ function App() {
             replacePosition(complete.widgetConfig.initialPosition)
             setDegradation(null)
             setWidget(complete.widgetConfig)
+            setChangeId(complete.changeId)
             setSourceFiles(complete.sourceFiles)
+            setObservedPosition(null)
             setSelectedLine(null)
             setAttributionMessage(null)
+            setPinStatus(null)
             setEvaluationSource(null)
             return
           }
           if (isDegradationEvent(event)) {
             setDegradation(event)
             setWidget(null)
+            setChangeId(null)
             setObservations(null)
+            setObservedPosition(null)
             setLoadingKey(null)
             setEvaluationSource(null)
             setSourceFiles({})
             setSelectedLine(null)
             setAttributionMessage(null)
+            setPinStatus(null)
             replacePosition({})
             replaceCache(new Map())
             setError(null)
@@ -196,6 +207,7 @@ function App() {
             putCachedObservation(evaluation.positionKey, evaluation.observations)
             if (pending?.version === positionVersion.current) {
               setObservations(evaluation.observations)
+              setObservedPosition(pending.position)
               setEvaluationSource(evaluation.source)
               setLoadingKey(null)
               setSelectedLine(null)
@@ -276,6 +288,33 @@ function App() {
   }, [observations, sourceFiles])
 
   const selectedSourceFile = selectedLine === null ? undefined : sourceFiles[selectedLine.version]
+  const hasCurrentObservation = (
+    observations !== null
+    && observedPosition !== null
+    && canonicalPosition(observedPosition) === canonicalPosition(position)
+  )
+
+  const pinCurrentPosition = useCallback(async () => {
+    if (changeId === null || observedPosition === null || !hasCurrentObservation) {
+      setPinStatus('Evaluate this exact position before pinning it.')
+      return
+    }
+    setPinStatus('Writing regression test…')
+    try {
+      const response = await fetch(`${API_BASE}/diffs/${changeId}/pin`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ position: observedPosition }),
+      })
+      const payload = await response.json() as { testPath?: string; detail?: string }
+      if (!response.ok || payload.testPath === undefined) {
+        throw new Error(payload.detail ?? `Pin request failed (${response.status}).`)
+      }
+      setPinStatus(`Pinned regression test: ${payload.testPath}`)
+    } catch (reason) {
+      setPinStatus(reason instanceof Error ? reason.message : 'Could not write the regression test.')
+    }
+  }, [changeId, hasCurrentObservation, observedPosition])
 
   return (
     <main className="mx-auto max-w-6xl space-y-6 p-6 text-slate-950">
@@ -312,6 +351,17 @@ function App() {
             <p aria-live="polite" className="text-base font-medium text-slate-950">
               {caption ?? widget.surpriseMarker?.caption ?? 'Choose a cached position to inspect it.'}
             </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void pinCurrentPosition()}
+                disabled={!hasCurrentObservation || pinStatus === 'Writing regression test…'}
+                className="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-900 enabled:hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Pin this
+              </button>
+              {pinStatus ? <p role="status" className="text-sm text-slate-600">{pinStatus}</p> : null}
+            </div>
             {selectedLine && selectedSourceFile ? (
               <SourceViewer
                 responsibleLine={selectedLine}

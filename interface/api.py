@@ -19,7 +19,14 @@ from domain.harness_engineer import HarnessEngineer
 from domain.line_attribution import trace_attribution
 from domain.orchestrator import DegradeResult, GracefulDegradation
 from domain.ports import LLMClient, Repository, SandboxRuntime
-from domain.schema import InteractionSpec, KnobPosition, KnobValue, PartialInteractionSpec
+from domain.pin_as_test import write_pinned_head_test
+from domain.schema import (
+    InteractionSpec,
+    KnobPosition,
+    KnobValue,
+    PartialInteractionSpec,
+    TraceAttribution,
+)
 from domain.scout import scout
 from domain.synthesizer import synthesize
 from infra.llm.openai_adapter import OpenAIAdapter
@@ -80,6 +87,18 @@ class EvaluationRequest(BaseModel):
     position: dict[str, KnobValue]
 
 
+class PinRequest(BaseModel):
+    """The already-evaluated position the user wants to preserve as a regression test."""
+
+    position: dict[str, KnobValue]
+
+
+class PinResponse(BaseModel):
+    """The durable test path produced from the current cached observation."""
+
+    testPath: str
+
+
 @dataclass
 class _RunState:
     """One ephemeral run's replayable progress messages and terminal payload."""
@@ -118,6 +137,7 @@ def create_app(
     evaluation_runner: EvaluationRunner | None = None,
     repository: Repository | None = None,
     database_path: str | Path | None = None,
+    pinned_tests_dir: str | Path | None = None,
     model: str = DEFAULT_MODEL,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
 ) -> FastAPI:
@@ -127,6 +147,7 @@ def create_app(
     pipeline_runner = pipeline_runner or _run_pipeline_with_callbacks
     evaluation_runner = evaluation_runner or _evaluate_position
     repository = repository or SQLiteRepository(database_path or DEFAULT_SESSION_DATABASE_PATH)
+    pinned_tests_dir = Path(pinned_tests_dir or (_PROJECT_ROOT / "pinned_tests"))
     app = FastAPI(title="Lever interface")
     app.add_middleware(
         CORSMiddleware,
@@ -137,6 +158,7 @@ def create_app(
     runs: dict[str, _RunState] = {}
     app.state.runs = runs
     app.state.repository = repository
+    app.state.pinned_tests_dir = pinned_tests_dir
 
     @app.post("/diffs", response_model=DiffAccepted, status_code=status.HTTP_202_ACCEPTED)
     async def create_diff(request: DiffRequest) -> DiffAccepted:
@@ -225,6 +247,49 @@ def create_app(
         if persisted is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown changeId.")
         return persisted
+
+    @app.post("/diffs/{change_id}/pin", response_model=PinResponse)
+    async def pin_current_position(change_id: str, request: PinRequest) -> PinResponse:
+        """Write a head-regression test from a position already measured in this session."""
+        state = runs.get(change_id)
+        if state is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Pinning requires an active Lever session for this changeId.",
+            )
+        if not state.completed or state.spec is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The interactive result is not ready to pin yet.",
+            )
+        position = _validated_position(state.spec, request.position)
+        observation = state.position_cache.get(_position_key(position))
+        if observation is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Evaluate this position before pinning it.",
+            )
+        head_observations = observation.get("head")
+        if not isinstance(head_observations, dict):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The cached position has no head observation to pin.",
+            )
+        raw_trace = observation.get("trace")
+        try:
+            trace = TraceAttribution.model_validate(raw_trace) if raw_trace is not None else None
+        except ValueError:
+            trace = None
+        test_path = write_pinned_head_test(
+            pinned_tests_dir,
+            state.base_path,
+            state.head_path,
+            state.spec,
+            position,
+            head_observations,
+            trace.responsibleLine if trace is not None else None,
+        )
+        return PinResponse(testPath=str(test_path))
 
     @app.post("/heroes/{hero_id}/run")
     async def run_hero(hero_id: str, force: bool = False) -> dict[str, Any]:

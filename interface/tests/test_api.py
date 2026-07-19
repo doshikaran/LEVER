@@ -1,5 +1,7 @@
 """HTTP/WebSocket contract coverage without calling external services."""
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -165,6 +167,7 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
         runtime_factory=lambda: object(),
         llm_factory=lambda model, effort: object(),
         pipeline_runner=scripted_runner,
+        pinned_tests_dir=tmp_path / "pinned_tests",
         evaluation_runner=lambda base, head, spec, position, runtime: {
             "base": {"admitted": int(position.root["rps"])},
             "head": {"admitted": int(position.root["rps"]) * 2},
@@ -185,6 +188,7 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
 
         with client.websocket_connect(f"/ws/{change_id}") as websocket:
             messages = [websocket.receive_json() for _ in range(5)]
+            pinned = client.post(f"/diffs/{change_id}/pin", json={"position": {"rps": 3}})
             websocket.send_json(
                 {"type": "evaluate", "requestId": "off-cache", "position": {"rps": 4}}
             )
@@ -203,6 +207,11 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
     ]
     final = messages[-1]
     assert final["type"] == "complete"
+    assert pinned.status_code == 200
+    pinned_source = Path(pinned.json()["testPath"]).read_text()
+    assert "HarnessEngineer().generate" in pinned_source
+    assert "# Lever trace attribution:" in pinned_source
+    assert "EXPECTED_HEAD = json.loads('{\"admitted\": 2}')" in pinned_source
     assert persisted.status_code == 200
     # The terminal event contains Adversary's original cache.  A later fresh
     # interaction is persisted immediately, so the permalink retains it too.

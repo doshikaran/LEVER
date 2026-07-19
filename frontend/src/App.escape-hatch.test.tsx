@@ -97,4 +97,28 @@ describe('App escape hatch', () => {
     expect(screen.getByTestId('responsible-line').textContent).toContain('w = self.windows[tenant_id]')
     expect(screen.getByText('/repo/head.py')).toBeTruthy()
   })
+
+  it('pins the exact already-cached position instead of sending observations from the browser', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ changeId: complete.changeId }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ testPath: '/repo/pinned_tests/test_lever_trace.py' }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('WebSocket', TraceSocket)
+
+    render(<App />)
+
+    await waitFor(() => expect(screen.getByText('Cache hit — no network call')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Pin this' }))
+
+    expect(await screen.findByText('Pinned regression test: /repo/pinned_tests/test_lever_trace.py')).toBeTruthy()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[1]?.[0]).toContain('/diffs/trace-test/pin')
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ position: { rps: 3 } })
+  })
 })
