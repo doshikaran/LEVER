@@ -15,7 +15,6 @@ _HARNESS_TEMPLATE = """\
 import importlib.util
 import json
 import random
-import time
 
 MODULE_PATH = __MODULE_PATH__
 ENTRY_POINT = __ENTRY_POINT__
@@ -59,7 +58,9 @@ def run(config=None, seed=0):
     rps = max(1, int(driver.get("rps", driver.get("requests_per_tenant_per_sec", 1))))
     tenants = max(1, int(driver.get("tenants", driver.get("tenant_count", 1))))
     admitted = 0
-    started_at = time.time()
+    # Hero 1 accepts ``now`` as an argument. A fixed simulated epoch makes both
+    # generated harnesses and the independent reference path deterministic.
+    started_at = 0.0
     for request_index in range(rps):
         now = started_at + request_index / rps
         for tenant_index in range(tenants):

@@ -318,6 +318,8 @@ coverage_factor  = min(1, log(1 + samples) / log(1 + 256))
 confidence = agreement_rate × stability_factor × coverage_factor
 ```
 
+**Correction:** the differential test uses `K = 128` Sobol points (`m = 7`); the original `K = 64` / `256` pairing capped a perfect run at ~0.752 confidence and could never reach the `high` band.
+
 A path that flips route in 3 of 12 replicates scores `instability = 0.25` → `stability_factor = 0` → confidence collapses → graceful degradation. That is the correct behavior: **a route that isn't stable under stub uncertainty is not a route you should show someone.**
 
 **Why the product, not an average:** these are conjunctive requirements. A harness that agrees perfectly but is wildly unstable is not trustworthy, and averaging would hide that. Any factor near zero must dominate. [Design decision, not a derived fact.]
@@ -401,9 +403,9 @@ Rule 2 applies to all five packs. Rules 1 and 3 apply wherever there is a scale.
 | Feature | User-facing behavior | Trigger | Depends on | Breaks without it |
 |---|---|---|---|---|
 | **Differential test vs. real code** | Invisible when passing. | Symmetrist PASS | Harness pair, **an executable reference path** (see precondition below) | Lever becomes an LLM narrating what it thinks the code does. This is the product. |
-| **Sobol sampling** | Invisible. `K = 64` low-discrepancy points over knob space. | Start of differential test | Knob domains | Uniform random leaves gaps at small K; gaps are where stubs break. |
+| **Sobol sampling** | Invisible. `K = 128` low-discrepancy points over knob space. | Start of differential test | Knob domains | Uniform random leaves gaps at small K; gaps are where stubs break. |
 | **Assayer variance measurement** | Invisible. 12 replicates per §0.6, using the estimator matching each observable's kind. | Agreement computed | Uncertainty specs | Confidence pinned at 1.0 forever (C-1); categorical packs unbuildable (C-4). |
-| **Confidence computation** | Renders as a badge: *"Verified — matched real behavior on 61/64 sampled inputs."* | Assayer complete | Agreement + stability + coverage | Users have no way to check; trust becomes a claim rather than a measurement. |
+| **Confidence computation** | Renders as a badge: *"Verified — matched real behavior on 123/128 sampled inputs."* | Assayer complete | Agreement + stability + coverage | Users have no way to check; trust becomes a claim rather than a measurement. |
 | **Error bands / hatching (medium band)** | Numeric: curves render with shaded bands. Categorical: unstable cells/nodes/edges hatched. | `band === "medium"` | Assayer per-observable estimate | Uncertain results look identical to certain ones. |
 | **The Receipt** | Click *"Show me the receipt"* → the actual stack trace with real function frames, plus a download link to the generated harness. | User click on the confidence badge | `provenance.harnessSourceUri` | A skeptical engineer cannot check the claim in one click, so they don't believe it, so they don't use it. |
 | **Retry loop → Harness Engineer** | Invisible. Max 3 (§2.4). | Symmetrist FAIL, or `agreement_rate < 0.85` | Divergence report | One bad stub kills an otherwise-recoverable microworld. |
@@ -549,8 +551,8 @@ Rule 2 applies to all five packs. Rules 1 and 3 apply wherever there is a scale.
 | **Trigger** | `HarnessPair` emitted by Harness Engineer. |
 | **Input** | `{ harnessPair, referencePath, knobDomains, tolerance }` — from Harness Engineer + Scout. |
 | **Output** | `FidelityReport` (written into the spec) → **Adversary** (if verified) or **§1.10** (if degraded). |
-| **Internal process, in order** | **(a) Symmetrist** (§0.5) — fail fast, no execution. <br>**(b) Differential test** — Sobol-sample `K=64` points over knob space. At each: run `harnessA` and the **real base code path**; compare each observable within `tolerance`. Same for `harnessB` vs real head. Categorical observables (`matrixCell`, `nodeState`, `pathTrace`) use `tolerance: { kind: "exact" }`. `agreement_rate = matched/samples`. <br>**(c) Assayer** (§0.6) — `N=12` replicates, stub params drawn from uncertainty specs, seeds `H(baseSeed, i)`, identical within each A/B pair. Compute the estimator matching each observable's kind (C-4). <br>**(d) Confidence** — `agreement × stability × coverage`; assign band. |
-| **Why Sobol** | At K=64 over a 3–4 dimensional knob space, uniform random leaves clumps and voids. Stub infidelity concentrates at **boundaries**, which is exactly where voids fall. Low-discrepancy sequences cover the space evenly at small K. [Certain — this is the standard property of quasi-random sequences.] |
+| **Internal process, in order** | **(a) Symmetrist** (§0.5) — fail fast, no execution. <br>**(b) Differential test** — Sobol-sample `K=128` points (`m=7`) over knob space. At each: run `harnessA` and the **real base code path**; compare each observable within `tolerance`. Same for `harnessB` vs real head. Categorical observables (`matrixCell`, `nodeState`, `pathTrace`) use `tolerance: { kind: "exact" }`. `agreement_rate = matched/samples`. <br>**(c) Assayer** (§0.6) — `N=12` replicates, stub params drawn from uncertainty specs, seeds `H(baseSeed, i)`, identical within each A/B pair. Compute the estimator matching each observable's kind (C-4). <br>**(d) Confidence** — `agreement × stability × coverage`; assign band. |
+| **Why Sobol** | At K=128 over a 3–4 dimensional knob space, uniform random leaves clumps and voids. Stub infidelity concentrates at **boundaries**, which is exactly where voids fall. Low-discrepancy sequences cover the space evenly at small K. [Certain — this is the standard property of quasi-random sequences.] |
 | **Failure** | Symmetrist FAIL → return to Harness Engineer with `unjustifiedKeys` (counts as a retry). `agreement_rate < 0.85` → return to Harness Engineer with a **divergence report** (the specific inputs and the two disagreeing values) (counts as a retry). `confidence < 0.60` after a verified agreement → **no retry** (the harness is faithful; the *model* is just uncertain) → **§1.10** with reason *"I can build a model of this, but it depends too heavily on things I had to guess."* |
 | **Retry** | Shares Harness Engineer's budget of 3 (§2.3). |
 
@@ -738,7 +740,7 @@ A literal build checklist. Every step: **what fires**, **what caused it**, **sta
 | 26 | **Fidelity Verifier** | Step 24 | Running |
 | 27 | **Symmetrist Check** | Step 26 | PASS / FAIL |
 | 28 | If FAIL → **↺ LOOP A: back to step 21**, attempt += 1, with `unjustifiedKeys` | Step 27 FAIL | If attempt > 3 → **step 47** |
-| 29 | **Differential test**: Sobol K=64, A vs real base, B vs real head (categorical → `tolerance: exact`) | Step 27 PASS | `agreement_rate` |
+| 29 | **Differential test**: Sobol K=128 (`m=7`), A vs real base, B vs real head (categorical → `tolerance: exact`) | Step 27 PASS | `agreement_rate` |
 | 30 | If no executable reference exists → **jump to step 47** | Step 29 precondition | — |
 | 31 | If `agreement_rate < 0.85` → **↺ LOOP A: back to step 21**, attempt += 1, with divergence report | Step 29 | If attempt > 3 → **step 47** |
 | 32 | **Assayer**: N=12 replicates; per-observable estimator by kind (cv \| instability) | Step 29 pass | `StabilityEstimate` per observable |
