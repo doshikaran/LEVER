@@ -45,11 +45,58 @@ ReferenceProgramGenerator = Callable[[ReferenceProgramRequest], str]
 
 
 @dataclass(frozen=True)
+class ProposalShape:
+    """The knob-binding shape an entry-point template can execute faithfully."""
+
+    workload_description: str
+    required_driver_params: tuple[str, ...]
+    allowed_binding_kinds: frozenset[str]
+
+    def incompatibility_reason(
+        self, entry_point_fn: str, knobs: list[Knob]
+    ) -> str | None:
+        """Explain why a valid InteractionSpec cannot be served by this template."""
+        binding_kinds = {knob.binding.kind for knob in knobs}
+        driver_params = {
+            knob.binding.param
+            for knob in knobs
+            if knob.binding.kind == "driver"
+        }
+        missing_params = [
+            parameter
+            for parameter in self.required_driver_params
+            if parameter not in driver_params
+        ]
+        unsupported_kinds = binding_kinds - self.allowed_binding_kinds
+        if not missing_params and not unsupported_kinds:
+            return None
+
+        expected = "/".join(self.required_driver_params)
+        proposed_shape = _proposed_shape_description(knobs)
+        return (
+            f"registered template for '{entry_point_fn}' expects "
+            f"{self.workload_description} ({expected}); proposed spec is "
+            f"{proposed_shape}, which this template does not support"
+        )
+
+
+def _proposed_shape_description(knobs: list[Knob]) -> str:
+    """Name unsupported bindings without assuming a particular hero or pack."""
+    if len(knobs) == 1 and knobs[0].binding.kind == "argument":
+        return "a direct single-argument call"
+    bindings = ", ".join(
+        f"{knob.id}:{knob.binding.kind}" for knob in knobs
+    ) or "no knobs"
+    return f"knobs with bindings {bindings}"
+
+
+@dataclass(frozen=True)
 class EntryPointTemplate:
     """A paired harness/reference implementation for one stable entry-point ID."""
 
     harness_body: HarnessBodyGenerator
     reference_program: ReferenceProgramGenerator
+    proposal_shape: ProposalShape
     symmetrically_seeded_dependency_kinds: frozenset[str] = frozenset()
 
 
@@ -384,10 +431,22 @@ ENTRY_POINT_REGISTRY: Mapping[str, EntryPointTemplate] = MappingProxyType(
         "RateLimiter.admit": EntryPointTemplate(
             harness_body=_hero1_harness_body,
             reference_program=_hero1_reference_program,
+            proposal_shape=ProposalShape(
+                workload_description="a rate-limiter request workload",
+                # The template defaults to one tenant when it is not exposed as
+                # a control, so only rps is mandatory for a faithful invocation.
+                required_driver_params=("rps",),
+                allowed_binding_kinds=frozenset({"driver", "config"}),
+            ),
         ),
         "next_delay": EntryPointTemplate(
             harness_body=_hero2_harness_body,
             reference_program=_hero2_reference_program,
+            proposal_shape=ProposalShape(
+                workload_description="a concurrent-retry workload",
+                required_driver_params=("clients", "failureRate", "maxRetries"),
+                allowed_binding_kinds=frozenset({"driver"}),
+            ),
             symmetrically_seeded_dependency_kinds=frozenset({"random"}),
         ),
     }
@@ -403,6 +462,7 @@ __all__ = [
     "ENTRY_POINT_REGISTRY",
     "EntryPointTemplate",
     "HarnessBodyRequest",
+    "ProposalShape",
     "ReferenceProgramRequest",
     "get_entry_point_template",
 ]

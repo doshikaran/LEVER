@@ -13,6 +13,7 @@ from domain.harness_engineer import (
     HarnessEngineer,
     NO_HARNESS_TEMPLATE_REASON,
     NoHarnessTemplateRegistered,
+    UnsupportedTemplateProposal,
 )
 from domain.ports import LLMClient, SandboxRuntime
 from domain.schema import InteractionSpec, Provenance
@@ -146,6 +147,15 @@ def run_pipeline(
                         plain_explanation=(
                             f"Lever has no isolated harness/reference implementation for "
                             f"{scoped_change_set.entry_point.fn} yet."
+                        ),
+                        loop_a_attempts=loop_a_attempt,
+                    )
+                except UnsupportedTemplateProposal as error:
+                    return GracefulDegradation(
+                        str(error),
+                        plain_explanation=_plain_explanation(
+                            partial_spec.thesis,
+                            f"the registered {scoped_change_set.entry_point.fn} workload shape",
                         ),
                         loop_a_attempts=loop_a_attempt,
                     )

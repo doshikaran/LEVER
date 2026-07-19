@@ -153,7 +153,8 @@ def test_delta_prompt_and_validation_preserve_hero2s_driver_contract() -> None:
     assert all(knob.binding.kind == "driver" for knob in result.knobs)
     assert result.observables[0].extractor.kind == "trace"
     assert result.observables[0].extractor.agg == "p99"
-    assert "Hero 2 execution constraint" in fake.prompts[0]
+    assert "Hero 2 execution constraint" not in fake.prompts[0]
+    assert "clients` (integer, 1\u2013200)" not in fake.prompts[0]
 
 
 def test_hero2_harness_matches_direct_reference_over_the_full_sobol_design(tmp_path) -> None:

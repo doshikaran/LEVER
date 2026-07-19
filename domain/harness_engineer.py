@@ -20,6 +20,10 @@ class NoHarnessTemplateRegistered(ValueError):
         super().__init__(f"{NO_HARNESS_TEMPLATE_REASON}: {entry_point_fn}")
 
 
+class UnsupportedTemplateProposal(ValueError):
+    """Raised when a registered template cannot faithfully consume a valid spec."""
+
+
 @dataclass(frozen=True)
 class UncertaintySpec:
     """An Assayer perturbation declaration for one stubbed parameter."""
@@ -152,6 +156,9 @@ def build_harness_pair(
     template = get_entry_point_template(entry_point.fn)
     if template is None:
         raise NoHarnessTemplateRegistered(entry_point.fn)
+    incompatibility = template.proposal_shape.incompatibility_reason(entry_point.fn, knobs)
+    if incompatibility is not None:
+        raise UnsupportedTemplateProposal(incompatibility)
     stubs = tuple(
         _dependency_stub(entry)
         for entry in scoped_change_set.dependency_ledger.entries

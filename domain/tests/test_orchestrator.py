@@ -25,6 +25,7 @@ from infra.fakes.fake_sandbox import FakeSandboxRuntime
 
 
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "hero1"
+HERO2_FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "hero2"
 
 
 def _valid_response() -> dict:
@@ -52,6 +53,40 @@ def _valid_response() -> dict:
                 "render": "timeseries",
                 "unit": "requests",
                 "compareMode": "overlay",
+            }
+        ],
+    }
+
+
+def _live_hero2_numeric_fn_response() -> dict:
+    """Exact one-knob proposal recorded from tonight's generic live GPT run."""
+    return {
+        "thesis": (
+            "Retry delay changes from deterministic exponential backoff to a uniform "
+            "random value from zero to the same exponential ceiling."
+        ),
+        "domainPack": "numeric-fn",
+        "knobs": [
+            {
+                "id": "attempt",
+                "label": "Retry attempt",
+                "binding": {"kind": "argument", "fn": "next_delay", "argIndex": 0},
+                "type": "scalar",
+                "domain": {"min": 0, "max": 10, "step": 1},
+                "default": 0,
+                "scale": "linear",
+                "unit": None,
+                "axisRole": "x",
+            }
+        ],
+        "observables": [
+            {
+                "id": "delay",
+                "label": "Retry delay",
+                "extractor": {"kind": "returnValue", "path": "$"},
+                "render": "scalar",
+                "compareMode": "overlay",
+                "unit": "seconds",
             }
         ],
     }
@@ -238,4 +273,27 @@ def test_unregistered_entry_point_returns_graceful_degradation_without_execution
     assert result.reason == "no harness template registered for this entry-point shape"
     assert runtime.created_templates == ["base"]
     assert len(llm.prompts) == 1
+    assert not runtime.run_calls
+
+
+def test_live_hero2_numeric_fn_proposal_degrades_before_harness_execution() -> None:
+    """A valid direct call is not falsely fed to Hero 2's retry-workload template."""
+    runtime = FakeSandboxRuntime()
+    result = orchestrator.run_pipeline(
+        str(HERO2_FIXTURE_DIR / "base.py"),
+        str(HERO2_FIXTURE_DIR / "head.py"),
+        runtime,
+        FakeLLMClient([_live_hero2_numeric_fn_response()]),
+        "fake-model",
+        "low",
+    )
+
+    assert isinstance(result, orchestrator.GracefulDegradation)
+    assert result.reason == (
+        "registered template for 'next_delay' expects a concurrent-retry workload "
+        "(clients/failureRate/maxRetries); proposed spec is a direct single-argument "
+        "call, which this template does not support"
+    )
+    assert result.loop_a_attempts == 1
+    assert runtime.created_templates == ["base"]
     assert not runtime.run_calls
