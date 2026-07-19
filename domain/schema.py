@@ -1,8 +1,9 @@
 """Pydantic schemas shared by deterministic domain analysis components."""
 
-from typing import Literal
+from enum import Enum
+from typing import Annotated, Literal, TypeAlias
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, RootModel
 
 
 DependencyKind = Literal["pure", "io", "clock", "random", "network", "db", "native"]
@@ -49,3 +50,295 @@ class ScopedChangeSet(BaseModel):
     reach_depth: int = Field(default=0, ge=0, le=2)
     unscopable: bool = False
     reason: str | None = None
+
+
+class DomainPackId(str, Enum):
+    """Interaction-spec discriminator; each member documents its arity contract."""
+
+    def __new__(cls, value: str, requirement: str):
+        member = str.__new__(cls, value)
+        member._value_ = value
+        member.__doc__ = requirement
+        return member
+
+    RATE_LIMITER = (
+        "rate-limiter",
+        'Requires ≥1 knob with binding.kind === "driver"; exactly 1 "timeseries" observable.',
+    )
+    STATE_MACHINE = (
+        "state-machine",
+        'Requires ≥1 "enum" knob (the event); 1 "nodeState" observable.',
+    )
+    PERMISSION = (
+        "permission",
+        'Requires ≥2 "enum" knobs with axisRole set ("x" = subject, "y" = resource); '
+        '1 "matrixCell" observable.',
+    )
+    DECISION_TREE = (
+        "decision-tree",
+        'Requires 2–4 knobs, any mix of types (enum/scalar/boolean); exactly 1 "pathTrace" observable.',
+    )
+    NUMERIC_FN = (
+        "numeric-fn",
+        'Requires ≥1 "scalar" knob (axisRole: "x"); 1 "scalar" observable.',
+    )
+
+
+class NumericDomain(BaseModel):
+    """The numeric branch of Knob.domain."""
+
+    min: float
+    max: float
+    step: float
+
+
+class EnumDomain(BaseModel):
+    """The enum-values branch of Knob.domain."""
+
+    values: list[str]
+
+
+class ArgumentBinding(BaseModel):
+    """Binds a knob to a positional argument of the entry function."""
+
+    kind: Literal["argument"]
+    fn: str
+    argIndex: int
+
+
+class ConfigBinding(BaseModel):
+    """Binds a knob to a dotted key in the stub configuration."""
+
+    kind: Literal["config"]
+    path: str
+
+
+class DriverBinding(BaseModel):
+    """Binds a knob to a workload-driver parameter."""
+
+    kind: Literal["driver"]
+    param: str
+
+
+ParamBinding: TypeAlias = Annotated[
+    ArgumentBinding | ConfigBinding | DriverBinding,
+    Field(discriminator="kind"),
+]
+
+
+KnobValue: TypeAlias = float | str | bool
+
+
+class Knob(BaseModel):
+    """A parameterized control that binds directly to a harness input."""
+
+    id: str
+    label: str
+    binding: ParamBinding
+    type: Literal["scalar", "integer", "enum", "boolean"]
+    domain: NumericDomain | EnumDomain
+    default: KnobValue
+    scale: Literal["linear", "log"]
+    unit: str | None
+    axisRole: Literal["x", "y"] | None = None
+
+
+class ReturnValueExtractor(BaseModel):
+    """Extracts an observable via a JSONPath into the return value."""
+
+    kind: Literal["returnValue"]
+    path: str
+
+
+class CounterExtractor(BaseModel):
+    """Extracts an instrumented counter observable."""
+
+    kind: Literal["counter"]
+    name: str
+
+
+class TraceExtractor(BaseModel):
+    """Aggregates a named instrumentation trace event."""
+
+    kind: Literal["trace"]
+    event: str
+    agg: Literal["count", "p50", "p95", "p99", "max"]
+
+
+class PathExtractor(BaseModel):
+    """Extracts a branch-decision vector."""
+
+    kind: Literal["path"]
+    instrumentation: Literal["branch"]
+
+
+ObservableExtractor: TypeAlias = Annotated[
+    ReturnValueExtractor | CounterExtractor | TraceExtractor | PathExtractor,
+    Field(discriminator="kind"),
+]
+
+
+class Observable(BaseModel):
+    """A measured output rendered by the selected domain-pack template."""
+
+    id: str
+    label: str
+    extractor: ObservableExtractor
+    render: Literal[
+        "timeseries",
+        "scalar",
+        "histogram",
+        "matrixCell",
+        "nodeState",
+        "pathTrace",
+    ]
+    unit: str | None
+    compareMode: Literal["overlay", "delta", "ratio"]
+
+
+class KnobPosition(RootModel[dict[str, KnobValue]]):
+    """A mapping from stable knob IDs to their scalar, enum, or boolean values."""
+
+
+class NamedPosition(BaseModel):
+    """A measured cached position with a label that makes no worldly interpretation."""
+
+    position: KnobPosition
+    label: str
+    divergence: float
+
+
+class SurpriseMarker(BaseModel):
+    """The measured position at which the two versions visibly diverge."""
+
+    position: KnobPosition
+    divergence: float = Field(ge=0, le=1)
+    caption: str
+
+
+class SymmetristSummary(BaseModel):
+    """The Fidelity Report's Symmetrist result."""
+
+    passed: bool
+    hashA: str
+    hashB: str
+    unjustifiedKeys: list[str]
+
+
+class RelativeTolerance(BaseModel):
+    """Relative differential-test tolerance."""
+
+    kind: Literal["relative"]
+    epsilon: float
+
+
+class AbsoluteTolerance(BaseModel):
+    """Absolute differential-test tolerance."""
+
+    kind: Literal["absolute"]
+    epsilon: float
+
+
+class ExactTolerance(BaseModel):
+    """Exact differential-test tolerance for categorical outputs."""
+
+    kind: Literal["exact"]
+
+
+Tolerance: TypeAlias = Annotated[
+    RelativeTolerance | AbsoluteTolerance | ExactTolerance,
+    Field(discriminator="kind"),
+]
+
+
+class Agreement(BaseModel):
+    """Sampled differential-test agreement."""
+
+    samples: int
+    matched: int
+    rate: float
+    tolerance: Tolerance
+
+
+class CvStabilityEstimate(BaseModel):
+    """Coefficient-of-variation stability estimate for a numeric observable."""
+
+    kind: Literal["cv"]
+    value: float
+
+
+class InstabilityStabilityEstimate(BaseModel):
+    """Modal-deviation stability estimate for a categorical observable."""
+
+    kind: Literal["instability"]
+    value: float
+
+
+StabilityEstimate: TypeAlias = Annotated[
+    CvStabilityEstimate | InstabilityStabilityEstimate,
+    Field(discriminator="kind"),
+]
+
+
+class Stability(BaseModel):
+    """Per-observable stability across Assayer replicates."""
+
+    replicates: int
+    perObservable: dict[str, StabilityEstimate]
+
+
+class Coverage(BaseModel):
+    """The strategy and count used to cover the input space."""
+
+    samples: int
+    strategy: Literal["sobol", "grid", "random"]
+
+
+class FidelityReport(BaseModel):
+    """Verification, stability, coverage, and confidence measurements."""
+
+    verdict: Literal["verified", "degraded"]
+    symmetrist: SymmetristSummary
+    agreement: Agreement
+    stability: Stability
+    coverage: Coverage
+    confidence: float = Field(ge=0, le=1)
+    band: Literal["high", "medium", "low"]
+    degradeReason: str | None
+
+
+class Provenance(BaseModel):
+    """Ingestion and harness-origin facts attached to an Interaction Spec."""
+
+    baseSha: str
+    headSha: str
+    repoUrl: str
+    generatedAt: str
+    modelIds: dict[str, str]
+    harnessSourceUri: str
+    forced: bool | None = None
+
+
+class InteractionSpec(BaseModel):
+    """The complete document that flows through Lever's pipeline."""
+
+    specVersion: Literal["2.0"]
+    changeId: str
+    thesis: str = Field(max_length=140)
+    domainPack: DomainPackId
+    knobs: list[Knob] = Field(min_length=1, max_length=4)
+    observables: list[Observable] = Field(min_length=1, max_length=2)
+    initialPosition: KnobPosition
+    surpriseMarker: SurpriseMarker | None
+    presets: list[NamedPosition] | None = None
+    fidelity: FidelityReport
+    provenance: Provenance
+
+
+class PartialInteractionSpec(BaseModel):
+    """The Delta Analyst-owned subset of an Interaction Spec."""
+
+    thesis: str = Field(max_length=140)
+    domainPack: DomainPackId
+    knobs: list[Knob] = Field(min_length=1, max_length=4)
+    observables: list[Observable] = Field(min_length=1, max_length=2)

@@ -102,7 +102,7 @@ type Knob = {
 // ParamBinding is the load-bearing type: it is how a UI control becomes a real argument.
 type ParamBinding =
   | { kind: "argument"; fn: string; argIndex: number }   // positional arg of the entry fn
-  | { kind: "config";   path: string }                   // dotted key in stub config
+  | { kind: "config";   path: string }                   // dotted stub-config key, or a constructor/argument parameter introduced or changed by the diff; Symmetrist enforces environmental fakes byte-identically, while diff-justified real parameters may differ
   | { kind: "driver";   param: string };                 // workload driver param (e.g. "rps")
 
 type Observable = {

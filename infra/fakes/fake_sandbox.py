@@ -10,8 +10,9 @@ from domain.ports import SandboxRuntime
 class FakeSandboxRuntime(SandboxRuntime):
     """Runs Python snippets locally so domain tests do not use E2B."""
 
-    def __init__(self) -> None:
+    def __init__(self, scripted_results: list[dict] | None = None) -> None:
         self._sandbox_ids: set[str] = set()
+        self._scripted_results = list(scripted_results or [])
 
     def create_sandbox(self, template: str) -> str:
         """Create a local fake sandbox identifier."""
@@ -23,6 +24,8 @@ class FakeSandboxRuntime(SandboxRuntime):
         """Execute Python code locally and return its captured result."""
         if sandbox_id not in self._sandbox_ids:
             raise KeyError(f"Unknown sandbox: {sandbox_id}")
+        if self._scripted_results:
+            return self._scripted_results.pop(0)
 
         result = subprocess.run(
             [sys.executable, "-c", code],
