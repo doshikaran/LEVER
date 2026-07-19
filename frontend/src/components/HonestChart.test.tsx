@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
-import { fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const yAxisDomains = vi.hoisted(() => [] as unknown[])
 
@@ -8,7 +8,9 @@ vi.mock('recharts', () => ({
   CartesianGrid: () => null,
   Legend: () => null,
   Line: () => null,
-  LineChart: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  LineChart: ({ children, onClick }: { children: ReactNode; onClick?: () => void }) => (
+    <button type="button" data-testid="chart-canvas" onClick={onClick}>{children}</button>
+  ),
   ResponsiveContainer: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   Tooltip: () => null,
   XAxis: () => null,
@@ -24,6 +26,8 @@ describe('HonestChart zoom guardrail', () => {
   beforeEach(() => {
     yAxisDomains.length = 0
   })
+
+  afterEach(() => cleanup())
 
   it('keeps the Y-axis lower domain bound at zero after explicit zoom', () => {
     render(
@@ -47,5 +51,20 @@ describe('HonestChart zoom guardrail', () => {
     }
     expect(zoomedDomain[0]).toBe(0)
     expect(zoomedDomain[1]).toBe(189)
+  })
+
+  it('forwards a canvas click only through the explicit point-attribution callback', () => {
+    const onPointClick = vi.fn()
+    render(
+      <HonestChart
+        data={[{ x: 0, base: 1, head: 2 }]}
+        divergence={1}
+        onPointClick={onPointClick}
+      />,
+    )
+
+    fireEvent.click(screen.getByTestId('chart-canvas'))
+
+    expect(onPointClick).toHaveBeenCalledOnce()
   })
 })

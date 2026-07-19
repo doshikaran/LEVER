@@ -15,7 +15,9 @@ _LIVE_IDENTITY_MARKERS = frozenset({"auth0", "identity", "idp", "oauth", "saml"}
 _HARNESS_TEMPLATE = """\
 import importlib.util
 import json
+import os
 import random
+import sys
 
 MODULE_PATH = __MODULE_PATH__
 ENTRY_POINT = __ENTRY_POINT__
@@ -49,29 +51,57 @@ def run(config=None, seed=0):
     config_values = _values(config, CONFIG_KNOBS)
     module = _load_module()
     limiter_class = module.RateLimiter
+    entry_callable = module
+    for part in ENTRY_POINT.split("."):
+        entry_callable = getattr(entry_callable, part)
+    entry_code = getattr(entry_callable, "__code__", None)
+    target_module_path = os.path.abspath(MODULE_PATH)
+    executed_lines = set()
+    entry_lines = set()
+    line_hits = {}
+
+    def trace_lines(frame, event, _arg):
+        if event == "line" and os.path.abspath(frame.f_code.co_filename) == target_module_path:
+            executed_lines.add(frame.f_lineno)
+            line_hits[frame.f_lineno] = line_hits.get(frame.f_lineno, 0) + 1
+            if entry_code is not None and frame.f_code is entry_code:
+                entry_lines.add(frame.f_lineno)
+        return trace_lines
+
+    previous_trace = sys.gettrace()
+    sys.settrace(trace_lines)
     limit = int(config_values.get("limit_per_sec", 100))
     burst = int(config_values.get("burst", 0))
     try:
-        limiter = limiter_class(limit_per_sec=limit, burst=burst)
-    except TypeError:
-        limiter = limiter_class(limit_per_sec=limit)
+        try:
+            limiter = limiter_class(limit_per_sec=limit, burst=burst)
+        except TypeError:
+            limiter = limiter_class(limit_per_sec=limit)
 
-    rps = max(1, int(driver.get("rps", driver.get("requests_per_tenant_per_sec", 1))))
-    tenants = max(1, int(driver.get("tenants", driver.get("tenant_count", 1))))
-    admitted = 0
-    # Hero 1 accepts ``now`` as an argument. A fixed simulated epoch makes both
-    # generated harnesses and the independent reference path deterministic.
-    started_at = 0.0
-    for request_index in range(rps):
-        now = started_at + request_index / rps
-        for tenant_index in range(tenants):
-            admitted += limiter.admit(f"tenant-{tenant_index}", now)
+        rps = max(1, int(driver.get("rps", driver.get("requests_per_tenant_per_sec", 1))))
+        tenants = max(1, int(driver.get("tenants", driver.get("tenant_count", 1))))
+        admitted = 0
+        # Hero 1 accepts ``now`` as an argument. A fixed simulated epoch makes both
+        # generated harnesses and the independent reference path deterministic.
+        started_at = 0.0
+        for request_index in range(rps):
+            now = started_at + request_index / rps
+            for tenant_index in range(tenants):
+                admitted += limiter.admit(f"tenant-{tenant_index}", now)
+    finally:
+        sys.settrace(previous_trace)
 
     return {
         "entry_point": ENTRY_POINT,
         "driver": driver,
         "observations": {observable["id"]: admitted for observable in OBSERVABLES},
         "stub_config": STUB_CONFIG,
+        "trace": {
+            "file": MODULE_PATH,
+            "executed_lines": sorted(executed_lines),
+            "entry_lines": sorted(entry_lines),
+            "line_hits": {str(line): line_hits[line] for line in sorted(line_hits)},
+        },
     }
 
 

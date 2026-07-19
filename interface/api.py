@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from domain import orchestrator
 from domain.adversary import AdversaryResult, CacheEntry
 from domain.harness_engineer import HarnessEngineer
+from domain.line_attribution import trace_attribution
 from domain.orchestrator import DegradeResult, GracefulDegradation
 from domain.ports import LLMClient, Repository, SandboxRuntime
 from domain.schema import InteractionSpec, KnobPosition, KnobValue, PartialInteractionSpec
@@ -47,7 +48,7 @@ PipelineRunner = Callable[
     InteractionSpec | DegradeResult,
 ]
 EvaluationRunner = Callable[
-    [Path, Path, InteractionSpec, KnobPosition, SandboxRuntime], dict[str, dict[str, Any]],
+    [Path, Path, InteractionSpec, KnobPosition, SandboxRuntime], dict[str, Any],
 ]
 
 
@@ -166,6 +167,7 @@ def create_app(
                             ),
                         ),
                         {},
+                        _source_files(base_path, head_path),
                     ),
                 )
             else:
@@ -211,6 +213,7 @@ def create_app(
                         ),
                     ),
                     {},
+                    None,
                 ),
             )
         return DiffAccepted(changeId=change_id)
@@ -267,7 +270,13 @@ def create_app(
                         await websocket.send_json(event)
                     continue
                 if state.completed:
-                    await _serve_evaluations(websocket, state, runtime_factory, evaluation_runner)
+                    await _serve_evaluations(
+                        websocket,
+                        state,
+                        runtime_factory,
+                        evaluation_runner,
+                        repository,
+                    )
                     return
 
                 # Avoid missing an event that arrives between observing the
@@ -333,14 +342,24 @@ async def _run_in_background(
         _persist_terminal(
             state,
             repository,
-            _terminal_payload(state.change_id, result, state.position_cache),
+            _terminal_payload(
+                state.change_id,
+                result,
+                state.position_cache,
+                _source_files(state.base_path, state.head_path),
+            ),
         )
         return
 
     _persist_terminal(
         state,
         repository,
-        _terminal_payload(state.change_id, result, state.position_cache),
+        _terminal_payload(
+            state.change_id,
+            result,
+            state.position_cache,
+            _source_files(state.base_path, state.head_path),
+        ),
     )
 
 
@@ -356,6 +375,7 @@ def _terminal_payload(
     change_id: str,
     result: InteractionSpec | DegradeResult,
     position_cache: dict[str, dict[str, Any]],
+    source_files: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Serialize every terminal state into one persistence and presentation payload."""
     if isinstance(result, InteractionSpec):
@@ -364,6 +384,7 @@ def _terminal_payload(
             "changeId": change_id,
             "widgetConfig": synthesize(result).model_dump(mode="json"),
             "positionCache": position_cache,
+            "sourceFiles": source_files or {},
             "interactionSpec": result.model_dump(mode="json"),
         }
     return {
@@ -391,12 +412,20 @@ def _default_plain_explanation(result: DegradeResult) -> str:
 def _cache_from_adversary(result: AdversaryResult) -> dict[str, dict[str, Any]]:
     """Convert the retained search cache into the JSON payload served to clients."""
     return {
-        _position_key(entry): {
-            "base": entry.observations.base,
-            "head": entry.observations.head,
-        }
+        _position_key(entry): _cache_observation(entry)
         for entry in result.cache
     }
+
+
+def _cache_observation(entry: CacheEntry) -> dict[str, Any]:
+    """Serialize observations and their driver-collected source attribution."""
+    payload: dict[str, Any] = {
+        "base": entry.observations.base,
+        "head": entry.observations.head,
+    }
+    if entry.observations.trace is not None:
+        payload["trace"] = entry.observations.trace.model_dump(mode="json")
+    return payload
 
 
 def _run_hero_pipeline(
@@ -424,7 +453,12 @@ def _run_hero_pipeline(
         lambda _stage, _message: None,
         collect_adversary,
     )
-    return _terminal_payload(hero_key, result, position_cache)
+    return _terminal_payload(
+        hero_key,
+        result,
+        position_cache,
+        _source_files(fixture_paths[0], fixture_paths[1]),
+    )
 
 
 async def _serve_evaluations(
@@ -432,6 +466,7 @@ async def _serve_evaluations(
     state: _RunState,
     runtime_factory: Callable[[], SandboxRuntime],
     evaluation_runner: EvaluationRunner,
+    repository: Repository,
 ) -> None:
     """Keep a completed run's socket open for explicit cache-miss evaluations."""
     while True:
@@ -471,6 +506,18 @@ async def _serve_evaluations(
                     runtime_factory(),
                 )
                 state.position_cache[key] = observations
+                # A cache-miss result is now part of the session ledger too.  Persist
+                # it immediately so a permalink retains its empirical attribution.
+                if state.spec is not None:
+                    repository.save(
+                        state.change_id,
+                        _terminal_payload(
+                            state.change_id,
+                            state.spec,
+                            state.position_cache,
+                            _source_files(state.base_path, state.head_path),
+                        ),
+                    )
                 source = "fresh"
             await websocket.send_json(
                 {
@@ -525,7 +572,7 @@ def _evaluate_position(
     spec: InteractionSpec,
     position: KnobPosition,
     runtime: SandboxRuntime,
-) -> dict[str, dict[str, Any]]:
+) -> dict[str, Any]:
     """Evaluate both generated harnesses at one new position in a fresh real sandbox."""
     base_source = base_path.read_text()
     head_source = head_path.read_text()
@@ -560,10 +607,25 @@ def _evaluate_position(
         _stage_source(runtime, sandbox_id, head_module, head_source)
         _stage_source(runtime, sandbox_id, f"{base_module}.harness.py", harness_pair.harness_a.source)
         _stage_source(runtime, sandbox_id, f"{head_module}.harness.py", harness_pair.harness_b.source)
-        return {
-            "base": _run_harness(runtime, sandbox_id, f"{base_module}.harness.py", position.root),
-            "head": _run_harness(runtime, sandbox_id, f"{head_module}.harness.py", position.root),
+        base_result = _run_harness(
+            runtime, sandbox_id, f"{base_module}.harness.py", position.root
+        )
+        head_result = _run_harness(
+            runtime, sandbox_id, f"{head_module}.harness.py", position.root
+        )
+        payload: dict[str, dict[str, Any] | Any] = {
+            "base": base_result["observations"],
+            "head": head_result["observations"],
         }
+        trace = trace_attribution(
+            base_result.get("trace"),
+            head_result.get("trace"),
+            base_source,
+            head_source,
+        )
+        if trace is not None:
+            payload["trace"] = trace.model_dump(mode="json")
+        return payload
     finally:
         runtime.kill_sandbox(sandbox_id)
 
@@ -587,17 +649,25 @@ def _run_harness(
     harness_path: str,
     position: dict[str, KnobValue],
 ) -> dict[str, Any]:
-    """Execute one generated harness and return only its observation bundle."""
+    """Execute one generated harness and return observations plus its raw trace."""
     code = (
         "import json, runpy\n"
         f"namespace = runpy.run_path({harness_path!r})\n"
         f"position = json.loads({json.dumps(json.dumps(position))})\n"
-        "print(json.dumps(namespace['run'](position, 0)['observations'], sort_keys=True))\n"
+        "print(json.dumps(namespace['run'](position, 0), sort_keys=True))\n"
     )
     result = runtime.run_code(sandbox_id, code)
     if result["exit_code"] != 0:
         raise RuntimeError(f"Harness execution failed: {result['stderr']}")
     return json.loads(result["stdout"])
+
+
+def _source_files(base_path: Path, head_path: Path) -> dict[str, dict[str, str]]:
+    """Serve the exact analyzed files once so the browser can highlight empirical lines."""
+    return {
+        "base": {"path": str(base_path), "source": base_path.read_text()},
+        "head": {"path": str(head_path), "source": head_path.read_text()},
+    }
 
 
 def _validated_paths(request: DiffRequest) -> tuple[Path, Path]:

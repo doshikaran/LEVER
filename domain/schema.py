@@ -200,6 +200,32 @@ class KnobPosition(RootModel[dict[str, KnobValue]]):
     """A mapping from stable knob IDs to their scalar, enum, or boolean values."""
 
 
+class VersionExecutionTrace(BaseModel):
+    """Source lines empirically executed by one target module for one knob position."""
+
+    file: str
+    executedLines: list[int]
+    entryLines: list[int]
+    lineHits: dict[int, int] = Field(default_factory=dict)
+
+
+class ResponsibleLine(BaseModel):
+    """One empirically exclusive executed source line that explains an A/B divergence."""
+
+    version: Literal["base", "head"]
+    file: str
+    line: int = Field(ge=1)
+    code: str
+
+
+class TraceAttribution(BaseModel):
+    """Paired execution traces and the deterministic escape-hatch source location."""
+
+    base: VersionExecutionTrace
+    head: VersionExecutionTrace
+    responsibleLine: ResponsibleLine | None = None
+
+
 class NamedPosition(BaseModel):
     """A measured cached position with a label that makes no worldly interpretation."""
 

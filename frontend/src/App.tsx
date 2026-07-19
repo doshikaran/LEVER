@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { HonestChart } from './components/HonestChart'
 import { KnobPanel } from './components/KnobPanel'
 import { DegradationPanel } from './components/DegradationPanel'
+import { SourceViewer } from './components/SourceViewer'
 import { useMicroworldStore } from './store/useMicroworldStore'
 import type {
   CompleteEvent,
@@ -10,6 +11,8 @@ import type {
   KnobPosition,
   ObservationBundle,
   ProgressEvent,
+  ResponsibleLine,
+  SourceFiles,
   WidgetConfig,
 } from './types'
 
@@ -102,12 +105,20 @@ function App() {
   const [loadingKey, setLoadingKey] = useState<string | null>(null)
   const [evaluationSource, setEvaluationSource] = useState<'cache' | 'fresh' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [sourceFiles, setSourceFiles] = useState<SourceFiles>({})
+  const [selectedLine, setSelectedLine] = useState<ResponsibleLine | null>(null)
+  const [attributionMessage, setAttributionMessage] = useState<string | null>(null)
   const socket = useRef<WebSocket | null>(null)
   const pendingRequests = useRef(new Map<string, PendingRequest>())
   const positionVersion = useRef(0)
   const dragSettleTimer = useRef<number | undefined>(undefined)
 
   const evaluatePosition = useCallback(async (nextPosition: KnobPosition, version: number) => {
+    // A new input invalidates a prior source selection immediately.  Do this
+    // before awaiting the position hash so a late cache lookup cannot erase a
+    // source viewer the user has just opened for the current point.
+    setSelectedLine(null)
+    setAttributionMessage(null)
     const key = await hashPosition(nextPosition)
     if (version !== positionVersion.current) return
 
@@ -158,6 +169,9 @@ function App() {
             replacePosition(complete.widgetConfig.initialPosition)
             setDegradation(null)
             setWidget(complete.widgetConfig)
+            setSourceFiles(complete.sourceFiles)
+            setSelectedLine(null)
+            setAttributionMessage(null)
             setEvaluationSource(null)
             return
           }
@@ -167,6 +181,9 @@ function App() {
             setObservations(null)
             setLoadingKey(null)
             setEvaluationSource(null)
+            setSourceFiles({})
+            setSelectedLine(null)
+            setAttributionMessage(null)
             replacePosition({})
             replaceCache(new Map())
             setError(null)
@@ -181,6 +198,8 @@ function App() {
               setObservations(evaluation.observations)
               setEvaluationSource(evaluation.source)
               setLoadingKey(null)
+              setSelectedLine(null)
+              setAttributionMessage(null)
             }
             return
           }
@@ -242,6 +261,22 @@ function App() {
     return 'Preparing analysis…'
   }, [degradation, evaluationSource, loadingKey, widget])
 
+  const openResponsibleLine = useCallback(() => {
+    const responsibleLine = observations?.trace?.responsibleLine
+    if (responsibleLine === null || responsibleLine === undefined) {
+      setAttributionMessage('No version-exclusive executed entry-point line was recorded for this position.')
+      return
+    }
+    if (sourceFiles[responsibleLine.version] === undefined) {
+      setAttributionMessage('The analyzed source file is unavailable for this persisted session.')
+      return
+    }
+    setAttributionMessage(null)
+    setSelectedLine(responsibleLine)
+  }, [observations, sourceFiles])
+
+  const selectedSourceFile = selectedLine === null ? undefined : sourceFiles[selectedLine.version]
+
   return (
     <main className="mx-auto max-w-6xl space-y-6 p-6 text-slate-950">
       <header className="space-y-2">
@@ -271,10 +306,19 @@ function App() {
               title={chart.label}
               divergence={values.divergence}
               data={[{ x: 'Current position', base: values.base, head: values.head }]}
+              onPointClick={openResponsibleLine}
             />
+            {attributionMessage ? <p role="status" className="text-sm text-slate-600">{attributionMessage}</p> : null}
             <p aria-live="polite" className="text-base font-medium text-slate-950">
               {caption ?? widget.surpriseMarker?.caption ?? 'Choose a cached position to inspect it.'}
             </p>
+            {selectedLine && selectedSourceFile ? (
+              <SourceViewer
+                responsibleLine={selectedLine}
+                sourceFile={selectedSourceFile}
+                onClose={() => setSelectedLine(null)}
+              />
+            ) : null}
           </div>
         </section>
       ) : null}

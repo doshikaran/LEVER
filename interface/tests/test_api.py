@@ -20,9 +20,12 @@ from domain.schema import (
     KnobPosition,
     Provenance,
     RelativeTolerance,
+    ResponsibleLine,
     Stability,
     SurpriseMarker,
     SymmetristSummary,
+    TraceAttribution,
+    VersionExecutionTrace,
 )
 from infra.persistence.sqlite_adapter import SQLiteRepository
 from interface.api import create_app
@@ -132,7 +135,24 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
                 cache=(
                     CacheEntry(
                         position=KnobPosition({"rps": 3}),
-                        observations=ObservationBundle(base={"admitted": 1}, head={"admitted": 2}),
+                        observations=ObservationBundle(
+                            base={"admitted": 1},
+                            head={"admitted": 2},
+                            trace=TraceAttribution(
+                                base=VersionExecutionTrace(
+                                    file=str(base), executedLines=[1], entryLines=[1]
+                                ),
+                                head=VersionExecutionTrace(
+                                    file=str(head), executedLines=[1], entryLines=[1]
+                                ),
+                                responsibleLine=ResponsibleLine(
+                                    version="head",
+                                    file=str(head),
+                                    line=1,
+                                    code="def rate(): return 2",
+                                ),
+                            ),
+                        ),
                     ),
                 ),
                 no_divergence=False,
@@ -184,12 +204,35 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
     final = messages[-1]
     assert final["type"] == "complete"
     assert persisted.status_code == 200
-    assert persisted.json() == final
+    # The terminal event contains Adversary's original cache.  A later fresh
+    # interaction is persisted immediately, so the permalink retains it too.
+    persisted_payload = persisted.json()
+    assert persisted_payload["type"] == "complete"
+    assert persisted_payload["positionCache"] == {
+        **final["positionCache"],
+        "cb0eff150ae5c5462d1506b4ef0e2d3d0c5304e71fbadcd3aca51c92f696442b": {
+            "base": {"admitted": 4},
+            "head": {"admitted": 8},
+        },
+    }
     assert final["widgetConfig"]["charts"][0]["yAxisZeroAnchored"] is True
     assert len(final["positionCache"]) == 1
     assert all(len(position_hash) == 64 for position_hash in final["positionCache"])
     assert list(final["positionCache"].values()) == [
-        {"base": {"admitted": 1}, "head": {"admitted": 2}}
+        {
+            "base": {"admitted": 1},
+            "head": {"admitted": 2},
+            "trace": {
+                "base": {"file": str(base), "executedLines": [1], "entryLines": [1], "lineHits": {}},
+                "head": {"file": str(head), "executedLines": [1], "entryLines": [1], "lineHits": {}},
+                "responsibleLine": {
+                    "version": "head",
+                    "file": str(head),
+                    "line": 1,
+                    "code": "def rate(): return 2",
+                },
+            },
+        }
     ]
     assert fresh_evaluation == {
         "type": "evaluation",

@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from domain.fidelity_verifier import FidelityVerification, sobol_points
 from domain.harness_engineer import HarnessPair
+from domain.line_attribution import trace_attribution
 from domain.ports import SandboxRuntime
 from domain.schema import (
     InteractionSpec,
@@ -17,6 +18,7 @@ from domain.schema import (
     Observable,
     PartialInteractionSpec,
     SurpriseMarker,
+    TraceAttribution,
 )
 
 
@@ -37,6 +39,7 @@ class ObservationBundle:
 
     base: dict[str, Any]
     head: dict[str, Any]
+    trace: TraceAttribution | None = None
 
 
 @dataclass(frozen=True)
@@ -134,7 +137,11 @@ class Adversary:
                 self._store(
                     cache,
                     observation.point,
-                    ObservationBundle(observation.base, observation.head),
+                    ObservationBundle(
+                        observation.base,
+                        observation.head,
+                        observation.trace,
+                    ),
                 )
 
         missing_explore_points = [
@@ -402,15 +409,24 @@ import json
 import runpy
 
 point = json.loads({json.dumps(json.dumps(point))})
-base = runpy.run_path({base_harness_path!r})["run"](point, 0)["observations"]
-head = runpy.run_path({head_harness_path!r})["run"](point, 0)["observations"]
+base = runpy.run_path({base_harness_path!r})["run"](point, 0)
+head = runpy.run_path({head_harness_path!r})["run"](point, 0)
 print(json.dumps({{"base": base, "head": head}}, sort_keys=True))
 """
             result = self._runtime.run_code(sandbox_id, code)
             if result["exit_code"] != 0:
                 raise RuntimeError(f"Adversary harness execution failed: {result['stderr']}")
             payload = json.loads(result["stdout"])
-            return ObservationBundle(base=payload["base"], head=payload["head"])
+            return ObservationBundle(
+                base=payload["base"]["observations"],
+                head=payload["head"]["observations"],
+                trace=trace_attribution(
+                    payload["base"].get("trace"),
+                    payload["head"].get("trace"),
+                    base_source,
+                    head_source,
+                ),
+            )
 
         def run_many(points: list[dict[str, Any]]) -> list[ObservationBundle]:
             """Execute a complete ascent round inside the already-running sandbox."""
@@ -421,7 +437,7 @@ import runpy
 points = json.loads({json.dumps(json.dumps(points))})
 
 def observations(path, point):
-    return runpy.run_path(path)["run"](point, 0)["observations"]
+    return runpy.run_path(path)["run"](point, 0)
 
 output = [
     {{
@@ -437,7 +453,16 @@ print(json.dumps(output, sort_keys=True))
                 raise RuntimeError(f"Adversary harness batch failed: {result['stderr']}")
             payload = json.loads(result["stdout"])
             return [
-                ObservationBundle(base=item["base"], head=item["head"])
+                ObservationBundle(
+                    base=item["base"]["observations"],
+                    head=item["head"]["observations"],
+                    trace=trace_attribution(
+                        item["base"].get("trace"),
+                        item["head"].get("trace"),
+                        base_source,
+                        head_source,
+                    ),
+                )
                 for item in payload
             ]
 

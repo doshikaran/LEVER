@@ -16,10 +16,39 @@ export type ControlDescriptor = Readonly<{
   axisRole: 'x' | 'y' | null
 }>
 
+export type VersionExecutionTrace = Readonly<{
+  file: string
+  executedLines: readonly number[]
+  entryLines: readonly number[]
+  lineHits?: Readonly<Record<string, number>>
+}>
+
+export type ResponsibleLine = Readonly<{
+  version: 'base' | 'head'
+  file: string
+  line: number
+  code: string
+}>
+
+/** Empirical ``sys.settrace`` evidence collected for this exact knob position. */
+export type TraceAttribution = Readonly<{
+  base: VersionExecutionTrace
+  head: VersionExecutionTrace
+  responsibleLine: ResponsibleLine | null
+}>
+
 export type ObservationBundle = Readonly<{
   base: Record<string, unknown>
   head: Record<string, unknown>
+  trace?: TraceAttribution
 }>
+
+export type SourceFile = Readonly<{
+  path: string
+  source: string
+}>
+
+export type SourceFiles = Readonly<Partial<Record<'base' | 'head', SourceFile>>>
 
 export type WidgetConfig = Readonly<{
   domainPack: string
@@ -55,6 +84,7 @@ export type CompleteEvent = Readonly<{
   changeId: string
   widgetConfig: WidgetConfig
   positionCache: Record<string, ObservationBundle>
+  sourceFiles: SourceFiles
 }>
 
 export type EvaluationEvent = Readonly<{

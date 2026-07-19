@@ -471,7 +471,7 @@ Rule 2 applies to all five packs. Rules 1 and 3 apply wherever there is a scale.
 | Feature | User-facing behavior | Trigger | Depends on | Breaks without it |
 |---|---|---|---|---|
 | **Pin-as-test** | Click *"Pin this"* → a regression test at the current `KnobPosition` is written to the branch, asserting the *current* observable values within `tolerance`. | User click | Current position, harness driver | The insight evaporates when the tab closes. This is the leverage payoff: play → artifact. |
-| **Permalink** | Copy link. Pasted into a PR comment, it renders the **live** microworld inline — the author drags the same slider and sees it too. | User click "Share" | Session persistence, `changeId` | Understanding stays in one head. Review remains two people describing different mental models in prose. |
+| **Permalink** | Copy link. It renders the live microworld when opened in Lever's own viewer. Inline rendering inside a GitHub PR comment is not possible — GitHub's Markdown sanitizer escapes `<iframe>` tags into visible literal text rather than rendering or stripping them (confirmed via GFM's Markdown API). The workflow is: paste the permalink as a plain link in the PR comment; the reviewer clicks through to Lever's viewer. | User click "Share" | Session persistence, `changeId` | Understanding stays in one head. Review remains two people describing different mental models in prose. |
 | **Session Ledger** | Sidebar list of every microworld generated, keyed to `(repo, changeId, commit)`. | Every widget mount | `changeId` | No re-run six months later; no drift detection; every stretch feature that needs history is impossible. |
 | **Ledger re-run** | Click a past entry → regenerates against current HEAD, showing whether behavior drifted. | User click on ledger entry | Ledger, full pipeline | — |
 
@@ -769,7 +769,7 @@ A literal build checklist. Every step: **what fires**, **what caused it**, **sta
 | 51 | **User clicks "Show me the receipt"** | `click` on badge | Real stack trace + harness download |
 | 51a | **User clicks a preset chip** | `click` | Knobs jump to that cached position |
 | 52 | **User clicks "Pin this"** | `click` | Regression test at current `KnobPosition` written to branch |
-| 53 | **User clicks "Share"** | `click` | Permalink copied; renders live inline in a PR comment |
+| 53 | **User clicks "Share"** | `click` | Permalink copied as a plain link; opens the live microworld in Lever's own viewer, not inline in a GitHub PR comment |
 | 54 | **Session Ledger** entry written | Step 43 | Keyed `(repo, changeId, commit)` |
 
 **The two loops, isolated:**

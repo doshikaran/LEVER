@@ -12,6 +12,7 @@ from typing import Any, Callable
 from scipy.stats import qmc
 
 from domain.harness_engineer import HarnessPair
+from domain.line_attribution import trace_attribution
 from domain.ports import SandboxRuntime
 from domain.schema import (
     Agreement,
@@ -27,6 +28,7 @@ from domain.schema import (
     ScopedChangeSet,
     Stability,
     SymmetristSummary,
+    TraceAttribution,
 )
 from domain.symmetrist import SymmetristResult, symmetrist_check
 
@@ -58,6 +60,7 @@ class FidelityObservation:
     point: dict[str, Any]
     base: dict[str, Any]
     head: dict[str, Any]
+    trace: TraceAttribution | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +127,7 @@ class FidelityVerifier:
         mismatches: list[DifferentialMismatch] = []
         evaluated_observations: list[FidelityObservation] = []
         agreeing_points: list[dict[str, Any]] = []
+        trace_for = getattr(runner, "trace_for", None)
         for point in points:
             point_matches = True
             harness_by_version: dict[str, dict[str, Any]] = {}
@@ -149,6 +153,7 @@ class FidelityVerifier:
                     point=dict(point),
                     base=harness_by_version["base"],
                     head=harness_by_version["head"],
+                    trace=trace_for(point) if trace_for is not None else None,
                 )
             )
 
@@ -288,6 +293,19 @@ class FidelityVerifier:
                 for point in agreeing_points
             ]
 
+        def trace_for(point: dict[str, Any]) -> TraceAttribution | None:
+            """Return this point's driver-collected paired trace after the suite has run."""
+            point_key = json.dumps(point, sort_keys=True, separators=(",", ":"))
+            item = differential_cache.get(point_key)
+            if item is None:
+                return None
+            return trace_attribution(
+                item.get("trace_base"),
+                item.get("trace_head"),
+                base_source,
+                head_source,
+            )
+
         def run(kind: str, point: dict[str, Any], seed: int | str) -> dict[str, Any]:
             """Amortize transport while preserving every logical invocation."""
             point_key = json.dumps(point, sort_keys=True, separators=(",", ":"))
@@ -338,6 +356,7 @@ class FidelityVerifier:
             return replicate_cache[point_key][seed_text][kind]
 
         setattr(run, "prepare_assay", prepare_assay)
+        setattr(run, "trace_for", trace_for)
         return run
 
 
@@ -620,7 +639,7 @@ def values(config, knobs):
 
 def run_harness(path, point, seed):
     namespace = runpy.run_path(path)
-    return namespace["run"](point, seed)["observations"]
+    return namespace["run"](point, seed)
 
 def run_reference(module_path, point, seed):
     random.seed(seed)
@@ -647,11 +666,15 @@ def run_reference(module_path, point, seed):
 if {mode!r} == "differential":
     output = {{"points": []}}
     for point in POINTS:
+        harness_base = run_harness(PATHS["harness_base"], point, 0)
+        harness_head = run_harness(PATHS["harness_head"], point, 0)
         output["points"].append({{
             "point": point,
-            "harness_base": run_harness(PATHS["harness_base"], point, 0),
+            "harness_base": harness_base["observations"],
+            "trace_base": harness_base.get("trace"),
             "reference_base": run_reference(PATHS["reference_base"], point, 0),
-            "harness_head": run_harness(PATHS["harness_head"], point, 0),
+            "harness_head": harness_head["observations"],
+            "trace_head": harness_head.get("trace"),
             "reference_head": run_reference(PATHS["reference_head"], point, 0),
         }})
 else:
@@ -661,8 +684,8 @@ else:
             "point": point,
             "replicates": {{
                 str(seed): {{
-                    "harness_base": run_harness(PATHS["harness_base"], point, seed),
-                    "harness_head": run_harness(PATHS["harness_head"], point, seed),
+                    "harness_base": run_harness(PATHS["harness_base"], point, seed)["observations"],
+                    "harness_head": run_harness(PATHS["harness_head"], point, seed)["observations"],
                 }}
                 for seed in seeds
             }},
@@ -711,7 +734,7 @@ SEEDS = json.loads({json.dumps(json.dumps(seeds))})
 
 def run_harness(path, seed):
     namespace = runpy.run_path(path)
-    return namespace["run"](POINT, seed)["observations"]
+    return namespace["run"](POINT, seed)
 
 def run_reference(program):
     namespace = {{}}
@@ -720,11 +743,19 @@ def run_reference(program):
 
 if {include_seed_in_result!r}:
     output = {{
-        str(seed): {{kind: run_harness(path, seed) for kind, path in HARNESS_PATHS.items()}}
+        str(seed): {{
+            kind: run_harness(path, seed)["observations"]
+            for kind, path in HARNESS_PATHS.items()
+        }}
         for seed in SEEDS
     }}
 else:
-    output = {{kind: run_harness(path, 0) for kind, path in HARNESS_PATHS.items()}}
+    harness_output = {{kind: run_harness(path, 0) for kind, path in HARNESS_PATHS.items()}}
+    output = {{kind: value["observations"] for kind, value in harness_output.items()}}
+    output.update({{
+        f"trace_{{kind.removeprefix('harness_')}}": value.get("trace")
+        for kind, value in harness_output.items()
+    }})
     output.update({{kind: run_reference(program) for kind, program in REFERENCE_PROGRAMS.items()}})
 print(json.dumps(output, sort_keys=True))
 """

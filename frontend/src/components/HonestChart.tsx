@@ -26,6 +26,8 @@ export type HonestChartProps = Readonly<{
   data: readonly HonestChartDatum[]
   divergence: number
   title?: string
+  /** A click always refers to the single, current KnobPosition shown here. */
+  onPointClick?: () => void
 }>
 
 const ZOOM_DURATION_MS = 3_000
@@ -38,6 +40,7 @@ export function HonestChart({
   data,
   divergence,
   title = 'Behavior comparison',
+  onPointClick,
 }: HonestChartProps) {
   const [isZoomed, setIsZoomed] = useState(false)
   const zoomTimer = useRef<number | undefined>(undefined)
@@ -82,7 +85,11 @@ export function HonestChart({
 
       <div className="h-72 w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 8, right: 20, bottom: 8, left: 0 }}>
+          <LineChart
+            data={data}
+            margin={{ top: 8, right: 20, bottom: 8, left: 0 }}
+            onClick={onPointClick}
+          >
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey="x" />
             {isZoomed ? (
