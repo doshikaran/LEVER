@@ -170,3 +170,32 @@ def test_generated_hero1_harnesses_execute_the_real_fixture_modules() -> None:
     assert base.returncode == head.returncode == 0
     assert json.loads(base.stdout)["observations"] == {"admitted": 5}
     assert json.loads(head.stdout)["observations"] == {"admitted": 6}
+
+
+def test_generated_harness_embeds_optional_schema_values_as_python_literals() -> None:
+    """An LLM-proposed null unit stays valid Python and preserves its observable ID."""
+    spec = _hero_spec().model_copy(
+        update={
+            "observables": [
+                Observable(
+                    id="admission_decision",
+                    label="admission decision",
+                    extractor=CounterExtractor(kind="counter", name="admitted"),
+                    render="timeseries",
+                    unit=None,
+                    compareMode="overlay",
+                )
+            ]
+        }
+    )
+    pair = HarnessEngineer().generate(
+        _hero_scope(), spec, str(FIXTURE_DIR / "base.py"), str(FIXTURE_DIR / "head.py")
+    )
+
+    assert "null" not in pair.harness_a.source
+    compile(pair.harness_a.source, "generated-harness", "exec")
+    result = subprocess.run(
+        [sys.executable, "-c", pair.harness_a.source], capture_output=True, check=False, text=True
+    )
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["observations"] == {"admission_decision": 5}

@@ -28,6 +28,7 @@ MAX_EVALUATIONS = EXPLORE_POINTS + TOP_SEEDS * EXPLOIT_EVALUATIONS_PER_SEED
 NO_DIVERGENCE_EPSILON = 0.02
 
 EvaluationRunner = Callable[[dict[str, Any]], "ObservationBundle"]
+BatchEvaluationRunner = Callable[[list[dict[str, Any]]], list["ObservationBundle"]]
 
 
 @dataclass(frozen=True)
@@ -157,19 +158,34 @@ class Adversary:
             key=lambda point: divergences[_point_key(point)],
             reverse=True,
         )
-        for seed in ranked[:TOP_SEEDS]:
-            accounting = self._coordinate_ascent(
+        batch_runner = getattr(runner, "evaluate_many", None)
+        if batch_runner is not None:
+            accounting = self._batched_coordinate_ascent(
                 cache,
-                seed,
+                ranked[:TOP_SEEDS],
                 partial_spec.knobs,
                 partial_spec.observables,
-                runner,
                 explore_keys,
+                batch_runner,
             )
             exploit_attempted += accounting[0]
             exploit_executed_new += accounting[1]
             exploit_collisions_with_explore += accounting[2]
             exploit_collisions_with_exploit += accounting[3]
+        else:
+            for seed in ranked[:TOP_SEEDS]:
+                accounting = self._coordinate_ascent(
+                    cache,
+                    seed,
+                    partial_spec.knobs,
+                    partial_spec.observables,
+                    runner,
+                    explore_keys,
+                )
+                exploit_attempted += accounting[0]
+                exploit_executed_new += accounting[1]
+                exploit_collisions_with_explore += accounting[2]
+                exploit_collisions_with_exploit += accounting[3]
 
         search_accounting = SearchAccounting(
             explore_attempted=EXPLORE_POINTS,
@@ -272,6 +288,77 @@ class Adversary:
             collisions_with_exploit,
         )
 
+    def _batched_coordinate_ascent(
+        self,
+        cache: dict[str, CacheEntry],
+        seeds: list[dict[str, Any]],
+        knobs: list[Knob],
+        observables: list[Observable],
+        explore_keys: set[str],
+        evaluate_many: BatchEvaluationRunner,
+    ) -> tuple[int, int, int, int]:
+        """Run one ascent round for every seed per warm-sandbox transport call."""
+        states = [
+            {
+                "current": dict(seed),
+                "steps": {knob.id: _initial_step(knob) for knob in knobs},
+                "misses": {knob.id: 0 for knob in knobs},
+            }
+            for seed in seeds
+        ]
+        executed_new = 0
+        collisions_with_explore = 0
+        collisions_with_exploit = 0
+
+        for attempt in range(EXPLOIT_EVALUATIONS_PER_SEED):
+            knob = knobs[(attempt // 2) % len(knobs)]
+            direction = 1 if attempt % 2 == 0 else -1
+            candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            missing: dict[str, dict[str, Any]] = {}
+            for state in states:
+                candidate = _neighbor(
+                    state["current"], knob, direction, state["steps"][knob.id]
+                )
+                candidate_key = _point_key(candidate)
+                candidates.append((state, candidate))
+                if candidate_key in cache:
+                    if candidate_key in explore_keys:
+                        collisions_with_explore += 1
+                    else:
+                        collisions_with_exploit += 1
+                elif candidate_key in missing:
+                    # Another seed in this same round already owns the one real probe.
+                    collisions_with_exploit += 1
+                else:
+                    missing[candidate_key] = candidate
+                    executed_new += 1
+
+            if missing:
+                fresh_points = list(missing.values())
+                fresh_observations = evaluate_many(fresh_points)
+                for point, observations in zip(fresh_points, fresh_observations, strict=True):
+                    self._store(cache, point, observations)
+
+            divergences = _divergences(cache, observables)
+            for state, candidate in candidates:
+                if divergences[_point_key(candidate)] > divergences[_point_key(state["current"])]:
+                    state["current"] = candidate
+                    state["misses"][knob.id] = 0
+                else:
+                    state["misses"][knob.id] += 1
+                    if state["misses"][knob.id] >= 2:
+                        state["steps"][knob.id] = _halve_step(
+                            knob, state["steps"][knob.id]
+                        )
+                        state["misses"][knob.id] = 0
+
+        return (
+            len(seeds) * EXPLOIT_EVALUATIONS_PER_SEED,
+            executed_new,
+            collisions_with_explore,
+            collisions_with_exploit,
+        )
+
     def _evaluate(
         self,
         cache: dict[str, CacheEntry],
@@ -325,6 +412,36 @@ print(json.dumps({{"base": base, "head": head}}, sort_keys=True))
             payload = json.loads(result["stdout"])
             return ObservationBundle(base=payload["base"], head=payload["head"])
 
+        def run_many(points: list[dict[str, Any]]) -> list[ObservationBundle]:
+            """Execute a complete ascent round inside the already-running sandbox."""
+            code = f"""\
+import json
+import runpy
+
+points = json.loads({json.dumps(json.dumps(points))})
+
+def observations(path, point):
+    return runpy.run_path(path)["run"](point, 0)["observations"]
+
+output = [
+    {{
+        "base": observations({base_harness_path!r}, point),
+        "head": observations({head_harness_path!r}, point),
+    }}
+    for point in points
+]
+print(json.dumps(output, sort_keys=True))
+"""
+            result = self._runtime.run_code(sandbox_id, code)
+            if result["exit_code"] != 0:
+                raise RuntimeError(f"Adversary harness batch failed: {result['stderr']}")
+            payload = json.loads(result["stdout"])
+            return [
+                ObservationBundle(base=item["base"], head=item["head"])
+                for item in payload
+            ]
+
+        setattr(run, "evaluate_many", run_many)
         return run
 
 

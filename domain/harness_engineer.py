@@ -69,7 +69,7 @@ def run(config=None, seed=0):
     return {
         "entry_point": ENTRY_POINT,
         "driver": driver,
-        "observations": {"admitted": admitted},
+        "observations": {observable["id"]: admitted for observable in OBSERVABLES},
         "stub_config": STUB_CONFIG,
     }
 
@@ -206,14 +206,15 @@ def build_harness_pair(
     defaults = _default_config(knobs)
     common_replacements = {
         "__ENTRY_POINT__": json.dumps(entry_point.fn),
-        "__DEFAULT_CONFIG__": json.dumps(defaults, sort_keys=True),
-        "__CONFIG_KNOBS__": json.dumps(config_knobs, sort_keys=True),
-        "__DRIVER_KNOBS__": json.dumps(driver.knob_definitions, sort_keys=True),
-        "__STUB_CONFIG__": json.dumps(
-            {stub.dependency: stub.as_dict() for stub in stubs}, sort_keys=True
-        ),
-        "__OBSERVABLES__": json.dumps(
-            [observable.model_dump(mode="json") for observable in observables], sort_keys=True
+        # These constants are embedded in *Python* source, rather than a JSON
+        # document.  ``repr`` therefore preserves Python values such as None,
+        # which an LLM is permitted to propose for optional schema fields.
+        "__DEFAULT_CONFIG__": repr(defaults),
+        "__CONFIG_KNOBS__": repr(config_knobs),
+        "__DRIVER_KNOBS__": repr(driver.knob_definitions),
+        "__STUB_CONFIG__": repr({stub.dependency: stub.as_dict() for stub in stubs}),
+        "__OBSERVABLES__": repr(
+            [observable.model_dump(mode="json") for observable in observables]
         ),
     }
     harness_a_source = _render_harness(base_module_path, common_replacements)

@@ -1,0 +1,259 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { HonestChart } from './components/HonestChart'
+import { KnobPanel } from './components/KnobPanel'
+import { useMicroworldStore } from './store/useMicroworldStore'
+import type {
+  CompleteEvent,
+  EvaluationEvent,
+  KnobPosition,
+  ObservationBundle,
+  ProgressEvent,
+  WidgetConfig,
+} from './types'
+
+const API_BASE = import.meta.env.VITE_LEVER_API_BASE ?? 'http://127.0.0.1:8765'
+const HERO_1 = {
+  base_file_path:
+    import.meta.env.VITE_HERO1_BASE_FILE_PATH ??
+    '/Users/karandoshi/Desktop/Karan Doshi/Projects/OpenAI Hackathon/lever/fixtures/hero1/base.py',
+  head_file_path:
+    import.meta.env.VITE_HERO1_HEAD_FILE_PATH ??
+    '/Users/karandoshi/Desktop/Karan Doshi/Projects/OpenAI Hackathon/lever/fixtures/hero1/head.py',
+}
+const DRAG_SETTLE_MS = 120
+
+type PendingRequest = Readonly<{ key: string; version: number }>
+
+function socketBase(apiBase: string) {
+  const url = new URL(apiBase)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.toString().replace(/\/$/, '')
+}
+
+function canonicalNumber(value: number) {
+  if (!Number.isFinite(value)) throw new Error('Knob positions must contain finite numbers.')
+  if (Object.is(value, -0)) return '-0'
+  if (value === 0) return '0'
+  const exponent = Math.floor(Math.log10(Math.abs(value)))
+  if (exponent >= -4 && exponent < 15) {
+    return Number.parseFloat(value.toPrecision(15)).toString()
+  }
+  const [mantissa, rawExponent] = value.toExponential(14).split('e')
+  const normalizedMantissa = mantissa.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1')
+  const exponentSign = rawExponent.startsWith('-') ? '-' : '+'
+  const exponentValue = rawExponent.replace(/[+-]/, '').padStart(2, '0')
+  return `${normalizedMantissa}e${exponentSign}${exponentValue}`
+}
+
+function canonicalPosition(position: KnobPosition) {
+  return `{${Object.keys(position)
+    .sort()
+    .map((key) => {
+      const value = position[key]
+      const encoded =
+        typeof value === 'number'
+          ? canonicalNumber(value)
+          : typeof value === 'boolean'
+            ? String(value)
+            : JSON.stringify(value)
+      return `${JSON.stringify(key)}:${encoded}`
+    })
+    .join(',')}}`
+}
+
+async function hashPosition(position: KnobPosition) {
+  const bytes = new TextEncoder().encode(canonicalPosition(position))
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function chartValues(observations: ObservationBundle | null, observableId: string) {
+  const base = Number(observations?.base[observableId] ?? 0)
+  const head = Number(observations?.head[observableId] ?? 0)
+  return {
+    base,
+    head,
+    divergence: head === base ? 0 : Math.abs(head - base) / Math.max(Math.abs(head), Math.abs(base), 1),
+  }
+}
+
+function observationCaption(observations: ObservationBundle | null, observableId: string) {
+  if (observations === null) return null
+  const { base, head } = chartValues(observations, observableId)
+  if (base <= 0 || head < 0) return `Base: ${base}; Head: ${head}.`
+  return `Head admits ${(head / base).toFixed(1)}× as many requests (${head} vs ${base}).`
+}
+
+function App() {
+  const position = useMicroworldStore((state) => state.position)
+  const replacePosition = useMicroworldStore((state) => state.replacePosition)
+  const replaceCache = useMicroworldStore((state) => state.replaceCache)
+  const putCachedObservation = useMicroworldStore((state) => state.putCachedObservation)
+  const [progress, setProgress] = useState<ProgressEvent[]>([])
+  const [widget, setWidget] = useState<WidgetConfig | null>(null)
+  const [observations, setObservations] = useState<ObservationBundle | null>(null)
+  const [loadingKey, setLoadingKey] = useState<string | null>(null)
+  const [evaluationSource, setEvaluationSource] = useState<'cache' | 'fresh' | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const socket = useRef<WebSocket | null>(null)
+  const pendingRequests = useRef(new Map<string, PendingRequest>())
+  const positionVersion = useRef(0)
+  const dragSettleTimer = useRef<number | undefined>(undefined)
+
+  const evaluatePosition = useCallback(async (nextPosition: KnobPosition, version: number) => {
+    const key = await hashPosition(nextPosition)
+    if (version !== positionVersion.current) return
+
+    const cacheHit = useMicroworldStore.getState().cache.get(key)
+    if (cacheHit) {
+      setObservations(cacheHit)
+      setEvaluationSource('cache')
+      setLoadingKey(null)
+      return
+    }
+
+    if (socket.current?.readyState !== WebSocket.OPEN) {
+      setError('The evaluation connection is not ready.')
+      return
+    }
+    const requestId = crypto.randomUUID()
+    pendingRequests.current.set(requestId, { key, version })
+    setLoadingKey(key)
+    socket.current.send(JSON.stringify({ type: 'evaluate', requestId, position: nextPosition }))
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    let disposed = false
+
+    async function start() {
+      try {
+        const response = await fetch(`${API_BASE}/diffs`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(HERO_1),
+          signal: controller.signal,
+        })
+        if (!response.ok) throw new Error(`Diff request failed (${response.status}).`)
+        const { changeId } = (await response.json()) as { changeId: string }
+        const nextSocket = new WebSocket(`${socketBase(API_BASE)}/ws/${changeId}`)
+        socket.current = nextSocket
+
+        nextSocket.onmessage = (message) => {
+          const event = JSON.parse(message.data) as { type?: unknown }
+          if (event.type === 'progress') {
+            setProgress((current) => [...current, event as ProgressEvent])
+            return
+          }
+          if (event.type === 'complete') {
+            const complete = event as CompleteEvent
+            replaceCache(new Map(Object.entries(complete.positionCache)))
+            replacePosition(complete.widgetConfig.initialPosition)
+            setWidget(complete.widgetConfig)
+            setEvaluationSource(null)
+            return
+          }
+          if (event.type === 'evaluation') {
+            const evaluation = event as EvaluationEvent
+            const pending = pendingRequests.current.get(evaluation.requestId)
+            pendingRequests.current.delete(evaluation.requestId)
+            putCachedObservation(evaluation.positionKey, evaluation.observations)
+            if (pending?.version === positionVersion.current) {
+              setObservations(evaluation.observations)
+              setEvaluationSource(evaluation.source)
+              setLoadingKey(null)
+            }
+            return
+          }
+          if (event.type === 'evaluation_error') {
+            const failed = event as { requestId?: string; error?: string }
+            pendingRequests.current.delete(failed.requestId ?? '')
+            setLoadingKey(null)
+            setError(failed.error ?? 'Position evaluation failed.')
+            return
+          }
+          if (event.type === 'error' || event.type === 'terminal') {
+            const failed = event as { error?: string }
+            setError(failed.error ?? 'Lever could not produce an interactive result.')
+          }
+        }
+        nextSocket.onerror = () => setError('The WebSocket connection failed.')
+      } catch (reason) {
+        if (!disposed) setError(reason instanceof Error ? reason.message : 'Could not start Lever.')
+      }
+    }
+
+    void start()
+    return () => {
+      disposed = true
+      controller.abort()
+      socket.current?.close()
+    }
+  }, [putCachedObservation, replaceCache, replacePosition])
+
+  useEffect(() => {
+    if (widget === null || Object.keys(position).length === 0) return
+    if (dragSettleTimer.current !== undefined) {
+      window.clearTimeout(dragSettleTimer.current)
+    }
+    const settledPosition = { ...position }
+    dragSettleTimer.current = window.setTimeout(() => {
+      positionVersion.current += 1
+      void evaluatePosition(settledPosition, positionVersion.current)
+      dragSettleTimer.current = undefined
+    }, DRAG_SETTLE_MS)
+    return () => {
+      if (dragSettleTimer.current !== undefined) {
+        window.clearTimeout(dragSettleTimer.current)
+      }
+    }
+  }, [evaluatePosition, position, widget])
+
+  const chart = widget === null ? null : widget.charts[0]
+  const values = chart ? chartValues(observations, chart.observableId) : null
+  const caption = chart ? observationCaption(observations, chart.observableId) : null
+  const status = useMemo(() => {
+    if (loadingKey) return 'Evaluating this position…'
+    if (evaluationSource === 'fresh') {
+      return `Fresh microworld evaluation — not individually ground-truth verified; overall microworld confidence: ${widget?.fidelityBand ?? 'unknown'} (${Math.round((widget?.fidelityConfidence ?? 0) * 100)}%).`
+    }
+    if (evaluationSource === 'cache') return 'Cache hit — no network call'
+    if (widget) return 'Verified position'
+    return 'Preparing analysis…'
+  }, [evaluationSource, loadingKey, widget])
+
+  return (
+    <main className="mx-auto max-w-6xl space-y-6 p-6 text-slate-950">
+      <header className="space-y-2">
+        <p className="text-sm font-medium text-blue-700">Lever / Hero 1</p>
+        <h1 className="text-3xl font-semibold">Pull on the behavioral difference</h1>
+        <p className="max-w-3xl text-slate-700">{widget?.thesis ?? 'Preparing the verified rate-limiter comparison…'}</p>
+      </header>
+
+      <ol aria-label="Analysis progress" className="space-y-1 text-sm text-slate-700">
+        {progress.map((event) => <li key={event.stage}>{event.message}</li>)}
+      </ol>
+
+      {error ? <p role="alert" className="text-sm text-red-700">{error}</p> : null}
+
+      {widget && chart && values ? (
+        <section className="grid gap-8 lg:grid-cols-[18rem_minmax(0,1fr)]">
+          <KnobPanel controls={widget.controls} />
+          <div className="space-y-3">
+            <p className="text-sm text-slate-600" aria-live="polite">{status}</p>
+            <HonestChart
+              title={chart.label}
+              divergence={values.divergence}
+              data={[{ x: 'Current position', base: values.base, head: values.head }]}
+            />
+            <p aria-live="polite" className="text-base font-medium text-slate-950">
+              {caption ?? widget.surpriseMarker?.caption ?? 'Choose a cached position to inspect it.'}
+            </p>
+          </div>
+        </section>
+      ) : null}
+    </main>
+  )
+}
+
+export default App

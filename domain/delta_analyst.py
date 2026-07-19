@@ -124,6 +124,14 @@ Scoped head source:
 {source_head}
 ```
 
+Hero 1 execution constraint: if the selected entry point is `RateLimiter.admit`,
+the generated workload measures its aggregate admitted-request counter. Propose
+one observable with id `admitted`, a `counter` extractor named `admitted`,
+`timeseries` rendering, `overlay` comparison, and unit `requests`. To expose
+the tenant-isolation behavioral change, include the driver controls `rps` and
+`tenants`; when present in the change, include the config controls
+`limit_per_sec` and `burst` as well.
+
 Full InteractionSpec JSON Schema:
 {json.dumps(InteractionSpec.model_json_schema(), sort_keys=True)}
 

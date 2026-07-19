@@ -299,6 +299,7 @@ class FidelityVerifier:
                         paths,
                         all_points,
                         partial_spec.knobs,
+                        partial_spec.observables,
                         scoped_change_set,
                     ),
                     "differential suite",
@@ -431,12 +432,13 @@ def _harness_command(harness_path: str, point: dict[str, Any], seed: int | str) 
 def _reference_command(
     module_path: str,
     knobs: list[Knob],
+    observables: list[Observable],
     scoped_change_set: ScopedChangeSet,
     point: dict[str, Any],
     seed: int | str,
 ) -> str:
     """Run the real module directly with duplicated driver logic, never a harness import."""
-    return _reference_program(module_path, knobs, scoped_change_set, point, seed) + (
+    return _reference_program(module_path, knobs, observables, scoped_change_set, point, seed) + (
         "\nprint(json.dumps({\"observations\": OBSERVATIONS}, sort_keys=True))\n"
     )
 
@@ -444,6 +446,7 @@ def _reference_command(
 def _reference_program(
     module_path: str,
     knobs: list[Knob],
+    observables: list[Observable],
     scoped_change_set: ScopedChangeSet,
     point: dict[str, Any],
     seed: int | str,
@@ -462,6 +465,7 @@ def _reference_program(
         for knob in knobs
         if knob.binding.kind == "driver"
     ]
+    observable_ids = [observable.id for observable in observables]
     return f"""\
 import importlib.util
 import json
@@ -471,6 +475,7 @@ config = json.loads({json.dumps(json.dumps(point))})
 random.seed({seed})
 config_knobs = json.loads({json.dumps(json.dumps(config_knobs))})
 driver_knobs = json.loads({json.dumps(json.dumps(driver_knobs))})
+observable_ids = json.loads({json.dumps(json.dumps(observable_ids))})
 spec = importlib.util.spec_from_file_location("lever_reference", {module_path!r})
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -494,7 +499,7 @@ for request_index in range(rps):
     now = started_at + request_index / rps
     for tenant_index in range(tenants):
         admitted += limiter.admit(f"tenant-{{tenant_index}}", now)
-OBSERVATIONS = {{"admitted": admitted}}
+OBSERVATIONS = {{observable_id: admitted for observable_id in observable_ids}}
 """
 
 
@@ -502,15 +507,16 @@ def _differential_bundle_command(
     paths: dict[str, str],
     point: dict[str, Any],
     knobs: list[Knob],
+    observables: list[Observable],
     scoped_change_set: ScopedChangeSet,
 ) -> str:
     """Evaluate all four independent differential paths in one sandbox command."""
     reference_programs = {
         "reference_base": _reference_program(
-            paths["reference_base"], knobs, scoped_change_set, point, 0
+            paths["reference_base"], knobs, observables, scoped_change_set, point, 0
         ),
         "reference_head": _reference_program(
-            paths["reference_head"], knobs, scoped_change_set, point, 0
+            paths["reference_head"], knobs, observables, scoped_change_set, point, 0
         ),
     }
     return _bundle_program(
@@ -529,6 +535,7 @@ def _differential_suite_command(
     paths: dict[str, str],
     points: list[dict[str, Any]],
     knobs: list[Knob],
+    observables: list[Observable],
     scoped_change_set: ScopedChangeSet,
 ) -> str:
     """Run all 128 four-way comparisons in one already-warm sandbox command."""
@@ -536,6 +543,7 @@ def _differential_suite_command(
         paths,
         points,
         knobs,
+        [observable.id for observable in observables],
         scoped_change_set,
         mode="differential",
     )
@@ -566,6 +574,7 @@ def _assayer_suite_command(
         paths,
         points,
         knobs=[],
+        observable_ids=[],
         scoped_change_set=None,
         mode="assayer",
         seed_table=seed_table,
@@ -576,6 +585,7 @@ def _suite_program(
     paths: dict[str, str],
     points: list[dict[str, Any]],
     knobs: list[Knob],
+    observable_ids: list[str],
     scoped_change_set: ScopedChangeSet | None,
     mode: str,
     seed_table: list[list[str]] | None = None,
@@ -602,6 +612,7 @@ POINTS = json.loads({json.dumps(json.dumps(points))})
 PATHS = json.loads({json.dumps(json.dumps(paths, sort_keys=True))})
 CONFIG_KNOBS = json.loads({json.dumps(json.dumps(config_knobs))})
 DRIVER_KNOBS = json.loads({json.dumps(json.dumps(driver_knobs))})
+OBSERVABLE_IDS = json.loads({json.dumps(json.dumps(observable_ids))})
 SEED_TABLE = json.loads({json.dumps(json.dumps(seed_table))})
 
 def values(config, knobs):
@@ -631,7 +642,7 @@ def run_reference(module_path, point, seed):
         now = request_index / rps
         for tenant_index in range(tenants):
             admitted += limiter.admit(f"tenant-{{tenant_index}}", now)
-    return {{"admitted": admitted}}
+    return {{observable_id: admitted for observable_id in OBSERVABLE_IDS}}
 
 if {mode!r} == "differential":
     output = {{"points": []}}

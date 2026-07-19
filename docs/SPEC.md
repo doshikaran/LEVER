@@ -702,6 +702,7 @@ Something did happen: the new version now depends on a permission service being 
 - **Reach depth 2** (§2.1). Second-order effects beyond that are invisible. Blast-radius detection is excluded (§6.5) on soundness grounds: static analysis structurally cannot see dynamic dispatch, reflection, or event buses, and an unsound version would lie.
 - **No executable reference → no verification** (§1.5). Most repos in the wild will hit this.
 - **Empirical, not proven, tree coverage** (§0.3). *"Never reached across 128 sampled inputs"* is a measurement, not a proof of unreachability. Labeled as such in the UI.
+- Delta Analyst's thesis is generated from static diff analysis before Adversary searches the behavior space — it is a hypothesis, not a verified claim, and may describe a mechanism that turns out to be a minor contributor (or entirely absent) once Adversary's search completes. For pinned hero diffs, the thesis is hand-verified against the empirical surpriseMarker before freezing. For arbitrary live diffs, this reconciliation does not yet happen — the thesis and the surprise-marker caption should be read as two independent signals, not a single confirmed narrative, until a future version cross-validates them.
 
 ---
 

@@ -5,7 +5,7 @@ import shlex
 from pathlib import Path
 
 from dotenv import load_dotenv
-from e2b import Sandbox, SandboxNotFoundException, TimeoutException
+from e2b import CommandExitException, Sandbox, SandboxNotFoundException, TimeoutException
 
 from domain.ports import SandboxRuntime
 
@@ -55,6 +55,15 @@ class E2BSandboxRuntime(SandboxRuntime):
             if _is_lifetime_expiration(error):
                 self._raise_expired(sandbox_id, error)
             raise
+        except CommandExitException as error:
+            # The port contract represents guest-program failures as data.  E2B
+            # raises for these by default, which would otherwise bypass callers'
+            # normal exit-code handling.
+            return {
+                "stdout": error.stdout,
+                "stderr": error.stderr,
+                "exit_code": error.exit_code,
+            }
         return {
             "stdout": result.stdout,
             "stderr": result.stderr,
