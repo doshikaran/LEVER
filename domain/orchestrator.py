@@ -317,6 +317,10 @@ def run_pipeline(
                             partial_spec.thesis,
                             f"{scoped_change_set.entry_point.fn} at the boundary condition you care about",
                         ),
+                        # An inert result is still downstream of Delta Analyst.
+                        # Retaining both Loop-B drafts makes the Session Ledger
+                        # explain which modeled inputs were actually varied.
+                        proposedSpecs=tuple(proposed_specs),
                         registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                     )
                 # LOOP B: re-enter Delta Analyst, then re-run downstream work with its new spec.
@@ -330,6 +334,7 @@ def run_pipeline(
                         partial_spec.thesis,
                         f"{scoped_change_set.entry_point.fn} with a representative production input",
                     ),
+                    proposedSpecs=tuple(proposed_specs),
                     registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                 )
             interaction_spec = InteractionSpec(

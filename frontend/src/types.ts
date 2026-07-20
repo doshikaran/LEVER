@@ -1,4 +1,4 @@
-export type KnobValue = number | string | boolean
+export type KnobValue = number | string | boolean | null
 export type KnobPosition = Record<string, KnobValue>
 
 export type NumericDomain = Readonly<{ min: number; max: number; step: number }>
@@ -112,6 +112,28 @@ export type SearchTracePoint = Readonly<{
 export type SearchTraceEvent = Readonly<{
   type: 'search_trace'
   tracePoint: SearchTracePoint
+}>
+
+export type SearchObjective = 'max_divergence' | 'max_path_divergence' | 'reach_unsafe_state'
+
+export type UnsafePredicate = Readonly<{
+  observableId: string
+  operator: 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq'
+  target:
+    | Readonly<{ kind: 'literal'; value: KnobValue }>
+    | Readonly<{ kind: 'knob'; id: string }>
+  versions?: 'either' | 'base' | 'head'
+}>
+
+export type ObjectiveResultEvent = Readonly<{
+  type: 'objective_result'
+  requestId: string
+  objective: SearchObjective
+  unsafePredicate: UnsafePredicate | null
+  noUnsafeState: boolean
+  reason: string | null
+  surpriseMarker: WidgetConfig['surpriseMarker']
+  positionCache: Record<string, ObservationBundle>
 }>
 
 export type CompleteEvent = Readonly<{

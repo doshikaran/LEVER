@@ -126,7 +126,10 @@ ParamBinding: TypeAlias = Annotated[
 ]
 
 
-KnobValue: TypeAlias = float | str | bool
+# Positions may deliberately include an adversarial ``null`` during a
+# reach-unsafe-state search.  Normal UI controls still publish the concrete
+# scalar/string/boolean values described by their domain.
+KnobValue: TypeAlias = float | str | bool | None
 
 
 class Knob(BaseModel):
@@ -198,6 +201,40 @@ class Observable(BaseModel):
 
 class KnobPosition(RootModel[dict[str, KnobValue]]):
     """A mapping from stable knob IDs to their scalar, enum, or boolean values."""
+
+
+AdversaryObjective: TypeAlias = Literal[
+    "max_divergence", "max_path_divergence", "reach_unsafe_state"
+]
+
+
+class UnsafeLiteralTarget(BaseModel):
+    """Compares an observable with one explicit, JSON-serializable value."""
+
+    kind: Literal["literal"]
+    value: KnobValue
+
+
+class UnsafeKnobTarget(BaseModel):
+    """Compares an observable with the value of the named knob at each point."""
+
+    kind: Literal["knob"]
+    id: str = Field(min_length=1)
+
+
+UnsafePredicateTarget: TypeAlias = Annotated[
+    UnsafeLiteralTarget | UnsafeKnobTarget,
+    Field(discriminator="kind"),
+]
+
+
+class UnsafePredicate(BaseModel):
+    """A user-declared observable condition that makes a search position unsafe."""
+
+    observableId: str = Field(min_length=1)
+    operator: Literal["gt", "gte", "lt", "lte", "eq", "neq"]
+    target: UnsafePredicateTarget
+    versions: Literal["either", "base", "head"] = "either"
 
 
 class BranchDecision(BaseModel):

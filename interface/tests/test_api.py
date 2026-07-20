@@ -294,6 +294,108 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
     repository.close()
 
 
+def test_websocket_objective_search_streams_boundary_trace_and_retains_new_cache_points(
+    tmp_path, monkeypatch
+) -> None:
+    """The security selector reruns only Adversary and publishes its cache-forward result."""
+    base = tmp_path / "base.py"
+    head = tmp_path / "head.py"
+    reference = tmp_path / "reference.py"
+    base.write_text("def rate(): return 1\n")
+    head.write_text("def rate(): return 2\n")
+    reference.write_text("def test_reference() -> None: pass\n")
+
+    def terminal_runner(*args) -> InteractionSpec:
+        args[-2](
+            AdversaryResult(
+                initial_position=KnobPosition({"rps": 3}),
+                surprise_marker=None,
+                presets=(),
+                search_trace=(),
+                cache=(),
+                no_divergence=False,
+            )
+        )
+        return _spec()
+
+    def scripted_objective_search(
+        _base_path, _head_path, _specification, _runtime, objective, predicate, callback
+    ) -> AdversaryResult:
+        assert objective == "reach_unsafe_state"
+        assert predicate is not None
+        assert predicate.observableId == "admitted"
+        callback(TracePoint(KnobPosition({"rps": -1}), 1.0, "explore"))
+        return AdversaryResult(
+            initial_position=KnobPosition({"rps": -1}),
+            surprise_marker=SurpriseMarker(
+                position=KnobPosition({"rps": -1}),
+                divergence=1.0,
+                caption="Unsafe state reached in head: admitted=1 > 0.",
+            ),
+            presets=(),
+            search_trace=(),
+            cache=(
+                CacheEntry(
+                    position=KnobPosition({"rps": -1}),
+                    observations=ObservationBundle(
+                        base={"admitted": 0}, head={"admitted": 1}
+                    ),
+                ),
+            ),
+            no_divergence=False,
+            objective="reach_unsafe_state",
+            unsafe_predicate=predicate,
+        )
+
+    monkeypatch.setattr("interface.api._run_objective_search", scripted_objective_search)
+    repository = SQLiteRepository(tmp_path / "sessions.sqlite3")
+    app = create_app(
+        repository=repository,
+        runtime_factory=lambda: object(),
+        llm_factory=lambda _model, _effort: object(),
+        pipeline_runner=terminal_runner,
+    )
+    with TestClient(app) as client:
+        accepted = client.post(
+            "/diffs",
+            json={
+                "base_file_path": str(base),
+                "head_file_path": str(head),
+                "reference_file_path": str(reference),
+            },
+        )
+        with client.websocket_connect(f"/ws/{accepted.json()['changeId']}") as websocket:
+            assert websocket.receive_json()["type"] == "complete"
+            websocket.send_json(
+                {
+                    "type": "search_objective",
+                    "requestId": "unsafe-1",
+                    "objective": "reach_unsafe_state",
+                    "unsafePredicate": {
+                        "observableId": "admitted",
+                        "operator": "gt",
+                        "target": {"kind": "literal", "value": 0},
+                    },
+                }
+            )
+            started = websocket.receive_json()
+            trace = websocket.receive_json()
+            result = websocket.receive_json()
+
+    assert started == {
+        "type": "objective_started",
+        "requestId": "unsafe-1",
+        "objective": "reach_unsafe_state",
+    }
+    assert trace["type"] == "search_trace"
+    assert trace["tracePoint"]["position"] == {"rps": -1.0}
+    assert result["type"] == "objective_result"
+    assert result["noUnsafeState"] is False
+    assert result["surpriseMarker"]["caption"].startswith("Unsafe state reached")
+    assert len(result["positionCache"]) == 1
+    repository.close()
+
+
 @pytest.mark.parametrize(
     ("hero_id", "hero_key"),
     (("hero1", "hero:hero1"), ("hero4", "hero:hero4")),
@@ -393,7 +495,20 @@ def test_hero_result_is_frozen_without_reinvoking_orchestrator(
             ),
             "degraded",
         ),
-        (InertResult("No divergence found."), "inert"),
+        (
+            InertResult(
+                "No divergence found.",
+                proposedSpecs=(
+                    {
+                        "thesis": "A captured inert Delta draft.",
+                        "domainPack": "rate-limiter",
+                        "knobs": [],
+                        "observables": [],
+                    },
+                ),
+            ),
+            "inert",
+        ),
         (UnscopableResult("`view` requires live framework parameter `request`"), "unscopable"),
         (SkippedResult("formatting only"), "skipped"),
     ],

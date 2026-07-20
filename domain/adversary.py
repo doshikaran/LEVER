@@ -1,9 +1,12 @@
 """Deterministic cached search for the most behaviorally divergent knob position."""
 
 import json
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
+
+from scipy.stats import qmc
 
 from domain.fidelity_verifier import FidelityVerification, sobol_points
 from domain.harness_engineer import HarnessPair
@@ -11,6 +14,7 @@ from domain.line_attribution import trace_attribution
 from domain.ports import SandboxRuntime
 from domain.schema import (
     InteractionSpec,
+    AdversaryObjective,
     DomainPackId,
     Knob,
     KnobPosition,
@@ -20,6 +24,9 @@ from domain.schema import (
     PartialInteractionSpec,
     SurpriseMarker,
     TraceAttribution,
+    UnsafePredicate,
+    UnsafeLiteralTarget,
+    UnsafeKnobTarget,
 )
 
 
@@ -30,7 +37,8 @@ EXPLOIT_EVALUATIONS_PER_SEED = 8
 MAX_EVALUATIONS = EXPLORE_POINTS + TOP_SEEDS * EXPLOIT_EVALUATIONS_PER_SEED
 NO_DIVERGENCE_EPSILON = 0.02
 _NUMERIC_RENDERS = frozenset({"timeseries", "scalar", "histogram"})
-SearchObjective = Literal["normalized_divergence", "max_path_divergence"]
+SearchObjective = AdversaryObjective
+SamplerPrior = Literal["plausible", "boundary"]
 
 EvaluationRunner = Callable[[dict[str, Any]], "ObservationBundle"]
 BatchEvaluationRunner = Callable[[list[dict[str, Any]]], list["ObservationBundle"]]
@@ -90,6 +98,8 @@ class AdversaryResult:
     no_divergence: bool
     reason: str | None = None
     accounting: SearchAccounting | None = None
+    objective: SearchObjective = "max_divergence"
+    unsafe_predicate: UnsafePredicate | None = None
 
     def apply_to_spec(self, spec: InteractionSpec) -> InteractionSpec:
         """Write Adversary-owned fields into a completed InteractionSpec copy."""
@@ -124,8 +134,18 @@ class Adversary:
         base_source: str | None = None,
         head_source: str | None = None,
         trace_callback: Callable[[TracePoint], None] | None = None,
+        objective: SearchObjective | None = None,
+        unsafe_predicate: UnsafePredicate | None = None,
+        sampler_prior: SamplerPrior | None = None,
     ) -> AdversaryResult:
-        """Find the strongest divergence and emit every new trace point immediately."""
+        """Search the selected empirical objective and emit every point immediately.
+
+        ``reach_unsafe_state`` intentionally uses a different *prior*, not a
+        different search engine: boundary-oriented Sobol probes expose malformed
+        inputs before the same capped coordinate-ascent pass ranks them.
+        ``sampler_prior`` exists for deterministic tests and defaults from the
+        selected objective; callers should not need to set it in production.
+        """
         if fidelity.report.verdict != "verified":
             raise ValueError("Adversary requires a verified FidelityReport")
 
@@ -137,8 +157,17 @@ class Adversary:
                 sandbox_id, harness_pair, base_source, head_source
             )
 
-        objective = _objective_for(partial_spec.domainPack)
-        explore_points = sobol_points(partial_spec.knobs, m=EXPLORE_M)
+        objective = _objective_for(partial_spec.domainPack, objective)
+        if objective == "reach_unsafe_state" and unsafe_predicate is None:
+            raise ValueError("reach_unsafe_state requires an UnsafePredicate")
+        prior = sampler_prior or (
+            "boundary" if objective == "reach_unsafe_state" else "plausible"
+        )
+        explore_points = (
+            boundary_weighted_sobol_points(partial_spec.knobs, m=EXPLORE_M)
+            if prior == "boundary"
+            else sobol_points(partial_spec.knobs, m=EXPLORE_M)
+        )
         explore_keys = {_point_key(point) for point in explore_points}
         cache: dict[str, CacheEntry] = {}
         trace_points: list[TracePoint] = []
@@ -153,7 +182,9 @@ class Adversary:
             # collisions, by contrast, are not new probes and are omitted.
             if phase == "exploit" and key in traced_keys:
                 return
-            divergence = _divergences(cache, partial_spec.observables, objective)[key]
+            divergence = _divergences(
+                cache, partial_spec.observables, objective, unsafe_predicate
+            )[key]
             trace_point = TracePoint(cache[key].position, divergence, phase)
             trace_points.append(trace_point)
             traced_keys.add(key)
@@ -201,7 +232,9 @@ class Adversary:
         exploit_collisions_with_explore = 0
         exploit_collisions_with_exploit = 0
 
-        divergences = _divergences(cache, partial_spec.observables, objective)
+        divergences = _divergences(
+            cache, partial_spec.observables, objective, unsafe_predicate
+        )
         ranked = sorted(
             explore_points,
             key=lambda point: divergences[_point_key(point)],
@@ -215,6 +248,7 @@ class Adversary:
                 partial_spec.knobs,
                 partial_spec.observables,
                 objective,
+                unsafe_predicate,
                 explore_keys,
                 batch_runner,
                 record_trace,
@@ -231,6 +265,7 @@ class Adversary:
                     partial_spec.knobs,
                     partial_spec.observables,
                     objective,
+                    unsafe_predicate,
                     runner,
                     explore_keys,
                     record_trace,
@@ -252,12 +287,32 @@ class Adversary:
             ),
         )
 
-        divergences = _divergences(cache, partial_spec.observables, objective)
+        divergences = _divergences(
+            cache, partial_spec.observables, objective, unsafe_predicate
+        )
         trace = tuple(trace_points)
         best_key = max(divergences, key=divergences.get)
         best = cache[best_key]
         best_divergence = divergences[best_key]
-        if best_divergence < NO_DIVERGENCE_EPSILON:
+        no_result = (
+            best_divergence < 1.0
+            if objective == "reach_unsafe_state"
+            else best_divergence < NO_DIVERGENCE_EPSILON
+        )
+        if no_result:
+            reason = (
+                "No unsafe state "
+                + _unsafe_predicate_description(unsafe_predicate)
+                + " was reached after boundary-weighted exploration of "
+                + _varied_knobs(partial_spec.knobs)
+                + "."
+                if objective == "reach_unsafe_state"
+                else (
+                    "No normalized divergence reached 0.02 after varying "
+                    + _varied_knobs(partial_spec.knobs)
+                    + "."
+                )
+            )
             return AdversaryResult(
                 initial_position=None,
                 surprise_marker=None,
@@ -265,22 +320,24 @@ class Adversary:
                 search_trace=trace,
                 cache=tuple(cache.values()),
                 no_divergence=True,
-                reason=(
-                    "No normalized divergence reached 0.02 after varying "
-                    + _varied_knobs(partial_spec.knobs)
-                    + "."
-                ),
+                reason=reason,
                 accounting=search_accounting,
+                objective=objective,
+                unsafe_predicate=unsafe_predicate,
             )
 
         position = best.position
         marker = SurpriseMarker(
             position=position,
             divergence=min(1.0, best_divergence),
-            caption=_caption(best.observations, partial_spec.observables),
+            caption=(
+                _unsafe_caption(best.observations, best.position.root, unsafe_predicate)
+                if objective == "reach_unsafe_state"
+                else _caption(best.observations, partial_spec.observables)
+            ),
         )
         presets = tuple(
-            _preset(cache[key], divergences[key])
+            _preset(cache[key], divergences[key], objective)
             for key in sorted(divergences, key=divergences.get, reverse=True)[:3]
         )
         return AdversaryResult(
@@ -291,6 +348,8 @@ class Adversary:
             cache=tuple(cache.values()),
             no_divergence=False,
             accounting=search_accounting,
+            objective=objective,
+            unsafe_predicate=unsafe_predicate,
         )
 
     def _coordinate_ascent(
@@ -300,6 +359,7 @@ class Adversary:
         knobs: list[Knob],
         observables: list[Observable],
         objective: SearchObjective,
+        unsafe_predicate: UnsafePredicate | None,
         runner: EvaluationRunner,
         explore_keys: set[str],
         record_trace: Callable[[dict[str, Any], Literal["explore", "exploit"]], None],
@@ -326,7 +386,7 @@ class Adversary:
             _, added = self._evaluate(cache, candidate, runner)
             if added:
                 record_trace(candidate, "exploit")
-            divergences = _divergences(cache, observables, objective)
+            divergences = _divergences(cache, observables, objective, unsafe_predicate)
             if divergences[_point_key(candidate)] > divergences[_point_key(current)]:
                 current = candidate
                 misses[knob.id] = 0
@@ -349,6 +409,7 @@ class Adversary:
         knobs: list[Knob],
         observables: list[Observable],
         objective: SearchObjective,
+        unsafe_predicate: UnsafePredicate | None,
         explore_keys: set[str],
         evaluate_many: BatchEvaluationRunner,
         record_trace: Callable[[dict[str, Any], Literal["explore", "exploit"]], None],
@@ -396,7 +457,7 @@ class Adversary:
                     self._store(cache, point, observations)
                     record_trace(point, "exploit")
 
-            divergences = _divergences(cache, observables, objective)
+            divergences = _divergences(cache, observables, objective, unsafe_predicate)
             for state, candidate in candidates:
                 if divergences[_point_key(candidate)] > divergences[_point_key(state["current"])]:
                     state["current"] = candidate
@@ -534,11 +595,59 @@ print(json.dumps(output, sort_keys=True))
         return run
 
 
-def _objective_for(domain_pack: DomainPackId) -> SearchObjective:
-    """Select the C-5 path-vector objective automatically from the selected pack."""
+def _objective_for(
+    domain_pack: DomainPackId,
+    requested: SearchObjective | None = None,
+) -> SearchObjective:
+    """Select the pack default unless the user has deliberately chosen an objective."""
+    if requested is not None:
+        return requested
     if domain_pack is DomainPackId.DECISION_TREE:
         return "max_path_divergence"
-    return "normalized_divergence"
+    return "max_divergence"
+
+
+def boundary_weighted_sobol_points(knobs: list[Knob], m: int = EXPLORE_M) -> list[dict[str, Any]]:
+    """Generate a power-of-two Sobol design transformed toward adversarial boundaries.
+
+    The unit-cube Sobol design remains deterministic and evenly covers every
+    coordinate.  Only the inverse mapping changes: numeric controls favor
+    below-minimum/minimum/maximum/max-int values, and enum controls also see
+    null, empty and Unicode strings.  Driver numeric values deliberately use
+    their declared maximum instead of ``sys.maxsize``: an unbounded request
+    count could turn a safety probe into an unbounded workload.
+    """
+    if not knobs:
+        return [{} for _ in range(2**m)]
+    samples = qmc.Sobol(d=len(knobs), scramble=False).random_base2(m)
+    return [
+        {
+            knob.id: _boundary_scale_sample(float(sample[index]), knob)
+            for index, knob in enumerate(knobs)
+        }
+        for sample in samples
+    ]
+
+
+def _boundary_scale_sample(sample: float, knob: Knob) -> Any:
+    """Map one Sobol coordinate to a safe-but-adversarial value for a knob."""
+    if isinstance(knob.domain, NumericDomain):
+        maximum: float | int = (
+            knob.domain.max if knob.binding.kind == "driver" else sys.maxsize
+        )
+        values: list[float | int] = [-1, knob.domain.min, knob.domain.max, maximum]
+        value = values[min(int(sample * len(values)), len(values) - 1)]
+        return int(value) if knob.type == "integer" else float(value)
+    if knob.type == "boolean":
+        return bool(min(int(sample * 2), 1))
+
+    # These are values that commonly expose missing validation or unexpected
+    # lookup fall-through.  Declared values remain in the prior as well, so the
+    # search is adversarially broad rather than merely malformed.
+    candidates: list[Any] = [None, "", "⚠️", "contractor", "__proto__", "audit-log"]
+    candidates.extend(knob.domain.values)
+    values = list(dict.fromkeys(candidates))
+    return values[min(int(sample * len(values)), len(values) - 1)]
 
 
 def _emit_trace(
@@ -558,11 +667,21 @@ def _emit_trace(
 def _divergences(
     cache: dict[str, CacheEntry],
     observables: list[Observable],
-    objective: SearchObjective = "normalized_divergence",
+    objective: SearchObjective = "max_divergence",
+    unsafe_predicate: UnsafePredicate | None = None,
 ) -> dict[str, float]:
-    """Compute D(x), using C-5's max path Hamming distance for decision trees."""
+    """Score cached points for numeric/path divergence or unsafe reachability."""
     if not cache:
         return {}
+    if objective == "reach_unsafe_state":
+        if unsafe_predicate is None:
+            raise ValueError("reach_unsafe_state requires an UnsafePredicate")
+        return {
+            key: float(
+                _unsafe_matches(entry.observations, entry.position.root, unsafe_predicate)
+            )
+            for key, entry in cache.items()
+        }
     if not observables:
         # Coordinate ascent compares cached raw differences while preserving its caller's ranges.
         return {
@@ -593,6 +712,54 @@ def _divergences(
         / len(observables)
         for key, entry in cache.items()
     }
+
+
+def _unsafe_matches(
+    bundle: ObservationBundle,
+    point: dict[str, Any],
+    predicate: UnsafePredicate,
+) -> bool:
+    """Return whether a declared observable condition holds in either chosen version."""
+    if isinstance(predicate.target, UnsafeKnobTarget):
+        if predicate.target.id not in point:
+            return False
+        target: Any = point[predicate.target.id]
+    else:
+        assert isinstance(predicate.target, UnsafeLiteralTarget)
+        target = predicate.target.value
+
+    versions = (
+        (predicate.versions,)
+        if predicate.versions in {"base", "head"}
+        else ("base", "head")
+    )
+    for version in versions:
+        observations = bundle.base if version == "base" else bundle.head
+        if predicate.observableId not in observations:
+            continue
+        if _compare_unsafe_value(observations[predicate.observableId], predicate.operator, target):
+            return True
+    return False
+
+
+def _compare_unsafe_value(value: Any, operator: str, target: Any) -> bool:
+    """Evaluate a total, non-throwing comparison for user-supplied predicate data."""
+    try:
+        if operator == "gt":
+            return value > target
+        if operator == "gte":
+            return value >= target
+        if operator == "lt":
+            return value < target
+        if operator == "lte":
+            return value <= target
+        if operator == "eq":
+            return value == target
+        if operator == "neq":
+            return value != target
+    except TypeError:
+        return False
+    raise ValueError(f"Unsupported unsafe-predicate operator: {operator}")
 
 
 def _normalized_observable_distance(
@@ -680,7 +847,11 @@ def _neighbor(point: dict[str, Any], knob: Knob, direction: int, step: float | i
     """Move one coordinate while respecting scalar, enum, integer, and boolean domains."""
     candidate = dict(point)
     if isinstance(knob.domain, NumericDomain):
-        value = float(point[knob.id]) + direction * float(step)
+        try:
+            current = float(point[knob.id])
+        except (TypeError, ValueError):
+            current = knob.domain.min if direction > 0 else knob.domain.max
+        value = current + direction * float(step)
         value = min(knob.domain.max, max(knob.domain.min, value))
         value = round((value - knob.domain.min) / knob.domain.step) * knob.domain.step + knob.domain.min
         candidate[knob.id] = int(round(value)) if knob.type == "integer" else float(value)
@@ -689,7 +860,12 @@ def _neighbor(point: dict[str, Any], knob: Knob, direction: int, step: float | i
         candidate[knob.id] = not bool(point[knob.id])
         return candidate
     values = knob.domain.values
-    index = values.index(str(point[knob.id]))
+    try:
+        index = values.index(str(point[knob.id]))
+    except ValueError:
+        # A malformed Phase-1 enum/null sample reaches the nearest declared
+        # value before ascent continues; it must not crash the bounded search.
+        index = -1 if direction > 0 else 0
     candidate[knob.id] = values[(index + direction) % len(values)]
     return candidate
 
@@ -716,12 +892,63 @@ def _caption(bundle: ObservationBundle, observables: list[Observable]) -> str:
     return f"{observable.label}: base={base!r}, head={head!r}."
 
 
-def _preset(entry: CacheEntry, divergence: float) -> NamedPosition:
+def _unsafe_predicate_description(predicate: UnsafePredicate | None) -> str:
+    """Render the declared condition exactly enough for an honest no-result finding."""
+    if predicate is None:
+        return "(missing predicate)"
+    target = (
+        predicate.target.id
+        if isinstance(predicate.target, UnsafeKnobTarget)
+        else repr(predicate.target.value)
+    )
+    symbols = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<=", "eq": "==", "neq": "!="}
+    return f"{predicate.observableId} {symbols[predicate.operator]} {target}"
+
+
+def _unsafe_caption(
+    bundle: ObservationBundle,
+    point: dict[str, Any],
+    predicate: UnsafePredicate | None,
+) -> str:
+    """State the reached condition and version without recasting it as a divergence."""
+    if predicate is None:
+        return "An unsafe state was reached."
+    target = (
+        point.get(predicate.target.id)
+        if isinstance(predicate.target, UnsafeKnobTarget)
+        else predicate.target.value
+    )
+    symbols = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<=", "eq": "==", "neq": "!="}
+    versions = (
+        (predicate.versions,)
+        if predicate.versions in {"base", "head"}
+        else ("base", "head")
+    )
+    for version in versions:
+        observations = bundle.base if version == "base" else bundle.head
+        value = observations.get(predicate.observableId)
+        if _compare_unsafe_value(value, predicate.operator, target):
+            return (
+                f"Unsafe state reached in {version}: {predicate.observableId}={value!r} "
+                f"{symbols[predicate.operator]} {target!r}."
+            )
+    return "An unsafe state was reached."
+
+
+def _preset(
+    entry: CacheEntry,
+    divergence: float,
+    objective: SearchObjective = "max_divergence",
+) -> NamedPosition:
     """Create a measured-only cached preset label required by the spec."""
     values = ", ".join(f"{key}={value}" for key, value in entry.position.root.items())
     return NamedPosition(
         position=entry.position,
-        label=f"{values} — {divergence:.2f} normalized divergence",
+        label=(
+            f"{values} — unsafe state reached"
+            if objective == "reach_unsafe_state" and divergence >= 1.0
+            else f"{values} — {divergence:.2f} normalized divergence"
+        ),
         divergence=min(1.0, divergence),
     )
 
@@ -752,6 +979,9 @@ __all__ = [
     "MAX_EVALUATIONS",
     "NO_DIVERGENCE_EPSILON",
     "ObservationBundle",
+    "SearchObjective",
     "SearchAccounting",
+    "SamplerPrior",
     "TracePoint",
+    "boundary_weighted_sobol_points",
 ]

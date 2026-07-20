@@ -14,7 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from domain import orchestrator
-from domain.adversary import AdversaryResult, CacheEntry, TracePoint
+from domain.adversary import Adversary, AdversaryResult, CacheEntry, TracePoint
+from domain.fidelity_verifier import FidelityVerification
 from domain.harness_engineer import HarnessEngineer
 from domain.line_attribution import trace_attribution
 from domain.orchestrator import DegradeResult, GracefulDegradation
@@ -22,10 +23,12 @@ from domain.ports import LLMClient, Repository, SandboxRuntime
 from domain.pin_as_test import write_pinned_head_test
 from domain.schema import (
     InteractionSpec,
+    AdversaryObjective,
     KnobPosition,
     KnobValue,
     PartialInteractionSpec,
     TraceAttribution,
+    UnsafePredicate,
 )
 from domain.scout import scout
 from domain.synthesizer import synthesize
@@ -100,6 +103,15 @@ class EvaluationRequest(BaseModel):
     type: str
     requestId: str
     position: dict[str, KnobValue]
+
+
+class ObjectiveSearchRequest(BaseModel):
+    """A user-selected Adversary objective plus its optional unsafe predicate."""
+
+    type: str
+    requestId: str
+    objective: AdversaryObjective
+    unsafePredicate: UnsafePredicate | None = None
 
 
 class PinRequest(BaseModel):
@@ -590,21 +602,36 @@ async def _serve_evaluations(
     while True:
         try:
             raw_request = await websocket.receive_json()
-            request = EvaluationRequest.model_validate(raw_request)
         except WebSocketDisconnect:
             return
         except Exception as error:
             await websocket.send_json({"type": "evaluation_error", "error": str(error)})
             continue
 
-        if request.type != "evaluate":
+        request_type = raw_request.get("type") if isinstance(raw_request, dict) else None
+        if request_type == "search_objective":
+            await _serve_objective_search(
+                websocket,
+                state,
+                runtime_factory,
+                repository,
+                raw_request,
+            )
+            continue
+        if request_type != "evaluate":
             await websocket.send_json(
                 {
                     "type": "evaluation_error",
-                    "requestId": request.requestId,
+                    "requestId": raw_request.get("requestId") if isinstance(raw_request, dict) else None,
                     "error": "Unsupported WebSocket message type.",
                 }
             )
+            continue
+
+        try:
+            request = EvaluationRequest.model_validate(raw_request)
+        except Exception as error:
+            await websocket.send_json({"type": "evaluation_error", "error": str(error)})
             continue
 
         try:
@@ -654,6 +681,172 @@ async def _serve_evaluations(
                     "error": f"{type(error).__name__}: {error}",
                 }
             )
+
+
+async def _serve_objective_search(
+    websocket: WebSocket,
+    state: _RunState,
+    runtime_factory: Callable[[], SandboxRuntime],
+    repository: Repository,
+    raw_request: dict[str, Any],
+) -> None:
+    """Rerun only Adversary, streaming the newly selected objective's trace live."""
+    try:
+        request = ObjectiveSearchRequest.model_validate(raw_request)
+        if request.objective == "reach_unsafe_state" and request.unsafePredicate is None:
+            raise ValueError("reach_unsafe_state requires an unsafePredicate")
+        if state.spec is None:
+            raise ValueError("The completed run has no InteractionSpec to search.")
+    except Exception as error:
+        await websocket.send_json(
+            {
+                "type": "objective_error",
+                "requestId": raw_request.get("requestId"),
+                "error": f"{type(error).__name__}: {error}",
+            }
+        )
+        return
+
+    loop = asyncio.get_running_loop()
+    trace_queue: asyncio.Queue[TracePoint] = asyncio.Queue()
+
+    def on_trace(point: TracePoint) -> None:
+        loop.call_soon_threadsafe(trace_queue.put_nowait, point)
+
+    await websocket.send_json(
+        {"type": "objective_started", "requestId": request.requestId, "objective": request.objective}
+    )
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            _run_objective_search,
+            state.base_path,
+            state.head_path,
+            state.spec,
+            runtime_factory(),
+            request.objective,
+            request.unsafePredicate,
+            on_trace,
+        )
+    )
+    try:
+        while not task.done():
+            try:
+                trace = await asyncio.wait_for(trace_queue.get(), timeout=0.05)
+            except TimeoutError:
+                continue
+            await websocket.send_json(_trace_event(trace))
+        result = await task
+        while not trace_queue.empty():
+            await websocket.send_json(_trace_event(trace_queue.get_nowait()))
+    except Exception as error:
+        await websocket.send_json(
+            {
+                "type": "objective_error",
+                "requestId": request.requestId,
+                "error": f"{type(error).__name__}: {error}",
+            }
+        )
+        return
+
+    # Retain these observations alongside the original successful search so a
+    # security-search point is immediately reusable by the regular drag path.
+    state.position_cache.update(_cache_from_adversary(result))
+    repository.save(
+        state.change_id,
+        _terminal_payload(
+            state.change_id,
+            state.spec,
+            state.position_cache,
+            _source_files(state.base_path, state.head_path),
+        ),
+    )
+    await websocket.send_json(
+        {
+            "type": "objective_result",
+            "requestId": request.requestId,
+            "objective": request.objective,
+            "unsafePredicate": (
+                request.unsafePredicate.model_dump(mode="json")
+                if request.unsafePredicate is not None
+                else None
+            ),
+            "noUnsafeState": result.no_divergence,
+            "reason": result.reason,
+            "surpriseMarker": (
+                result.surprise_marker.model_dump(mode="json")
+                if result.surprise_marker is not None
+                else None
+            ),
+            "positionCache": state.position_cache,
+        }
+    )
+
+
+def _trace_event(trace_point: TracePoint) -> dict[str, Any]:
+    """Serialize one objective-search point in the existing Search Trace contract."""
+    return {
+        "type": "search_trace",
+        "tracePoint": {
+            "position": trace_point.position.root,
+            "divergence": trace_point.divergence,
+            "phase": trace_point.phase,
+        },
+    }
+
+
+def _run_objective_search(
+    base_path: Path,
+    head_path: Path,
+    spec: InteractionSpec,
+    runtime: SandboxRuntime,
+    objective: AdversaryObjective,
+    unsafe_predicate: UnsafePredicate | None,
+    trace_callback: SearchTraceCallback,
+) -> AdversaryResult:
+    """Reconstruct the executable pair and rerun Adversary without a new LLM/Fidelity pass."""
+    base_source = base_path.read_text()
+    head_source = head_path.read_text()
+    parser = TreeSitterPythonParser()
+    scope = scout(
+        base_source,
+        head_source,
+        parser.parse(base_source, "python"),
+        parser.parse(head_source, "python"),
+        str(base_path),
+        str(head_path),
+    )
+    if scope.entry_point is None:
+        raise ValueError(scope.reason or "Scout found no runnable entry point.")
+    partial_spec = PartialInteractionSpec(
+        thesis=spec.thesis,
+        domainPack=spec.domainPack,
+        knobs=spec.knobs,
+        observables=spec.observables,
+    )
+    sandbox_id = runtime.create_sandbox("base")
+    try:
+        pair = HarnessEngineer().generate(
+            scope,
+            partial_spec,
+            "/tmp/lever-objective/base.py",
+            "/tmp/lever-objective/head.py",
+            base_source,
+            head_source,
+        )
+        verification = FidelityVerification(report=spec.fidelity, mismatches=(), observations=())
+        return Adversary(runtime).search(
+            sandbox_id,
+            pair,
+            partial_spec,
+            verification,
+            base_source,
+            head_source,
+            trace_callback,
+            objective,
+            unsafe_predicate,
+        )
+    finally:
+        runtime.kill_sandbox(sandbox_id)
 
 
 def _run_pipeline_with_callbacks(

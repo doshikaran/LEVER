@@ -341,6 +341,44 @@ def test_loop_b_kicks_back_to_delta_analyst_once_then_recovers(monkeypatch) -> N
     assert not adversary_results
 
 
+def test_loop_b_terminal_inert_retains_each_delta_proposal(monkeypatch) -> None:
+    """The persisted inert finding exposes both drafts that exhausted Loop B."""
+    class VerifiedVerifier:
+        def __init__(self, runtime):
+            pass
+
+        def verify(self, *args, **kwargs):
+            return _fidelity(True)
+
+    class InertAdversary:
+        def __init__(self, runtime):
+            pass
+
+        def search(self, *args, **kwargs):
+            return _inert_result()
+
+    first = _valid_response()
+    second = _valid_response()
+    second["thesis"] = "A second proposed workload remained inert."
+    monkeypatch.setattr(orchestrator, "FidelityVerifier", VerifiedVerifier)
+    monkeypatch.setattr(orchestrator, "Adversary", InertAdversary)
+
+    result = orchestrator.run_pipeline(
+        str(FIXTURE_DIR / "base.py"),
+        str(FIXTURE_DIR / "head.py"),
+        FakeSandboxRuntime(),
+        FakeLLMClient([first, second]),
+        "fake-model",
+        "low",
+    )
+
+    assert isinstance(result, orchestrator.InertResult)
+    assert [proposal["thesis"] for proposal in result.proposedSpecs] == [
+        first["thesis"],
+        second["thesis"],
+    ]
+
+
 def test_unregistered_entry_point_returns_graceful_degradation_without_execution(monkeypatch) -> None:
     """Unsupported shapes stop at Harness Engineer before a harness or reference runs."""
     unregistered_scope = ScopedChangeSet(

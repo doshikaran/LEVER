@@ -5,6 +5,7 @@ import { DegradationPanel } from './components/DegradationPanel'
 import { SourceViewer } from './components/SourceViewer'
 import { UnionTree } from './components/UnionTree'
 import { SearchTrace } from './components/SearchTrace'
+import { ObjectiveSelector } from './components/ObjectiveSelector'
 import { useMicroworldStore } from './store/useMicroworldStore'
 import type {
   CompleteEvent,
@@ -12,11 +13,14 @@ import type {
   EvaluationEvent,
   KnobPosition,
   ObservationBundle,
+  ObjectiveResultEvent,
   ProgressEvent,
   ResponsibleLine,
   SearchTraceEvent,
   SearchTracePoint,
   SourceFiles,
+  SearchObjective,
+  UnsafePredicate,
   WidgetConfig,
 } from './types'
 
@@ -116,6 +120,8 @@ function App() {
   const [selectedLine, setSelectedLine] = useState<ResponsibleLine | null>(null)
   const [attributionMessage, setAttributionMessage] = useState<string | null>(null)
   const [pinStatus, setPinStatus] = useState<string | null>(null)
+  const [objectiveLoading, setObjectiveLoading] = useState(false)
+  const [objectiveFinding, setObjectiveFinding] = useState<string | null>(null)
   const socket = useRef<WebSocket | null>(null)
   const pendingRequests = useRef(new Map<string, PendingRequest>())
   const positionVersion = useRef(0)
@@ -192,6 +198,8 @@ function App() {
             setAttributionMessage(null)
             setPinStatus(null)
             setEvaluationSource(null)
+            setObjectiveLoading(false)
+            setObjectiveFinding(null)
             return
           }
           if (isDegradationEvent(event)) {
@@ -211,6 +219,8 @@ function App() {
             replacePosition({})
             replaceCache(new Map())
             setError(null)
+            setObjectiveLoading(false)
+            setObjectiveFinding(null)
             return
           }
           if (event.type === 'evaluation') {
@@ -233,6 +243,31 @@ function App() {
             pendingRequests.current.delete(failed.requestId ?? '')
             setLoadingKey(null)
             setError(failed.error ?? 'Position evaluation failed.')
+            return
+          }
+          if (event.type === 'objective_started') {
+            setSearchTrace([])
+            setObjectiveLoading(true)
+            setObjectiveFinding(null)
+            return
+          }
+          if (event.type === 'objective_result') {
+            const result = event as ObjectiveResultEvent
+            replaceCache(new Map(Object.entries(result.positionCache)))
+            setObjectiveLoading(false)
+            if (result.surpriseMarker !== null) {
+              selectedTracePosition.current = { ...result.surpriseMarker.position }
+              replacePosition(result.surpriseMarker.position)
+              setObjectiveFinding(result.surpriseMarker.caption)
+            } else {
+              setObjectiveFinding(result.reason ?? 'No unsafe state was reached.')
+            }
+            return
+          }
+          if (event.type === 'objective_error') {
+            const failed = event as { error?: string }
+            setObjectiveLoading(false)
+            setError(failed.error ?? 'Security search failed.')
             return
           }
           if (event.type === 'error') {
@@ -275,8 +310,9 @@ function App() {
   const chart = widget === null ? null : widget.charts[0]
   const unionTree = widget?.unionTree ?? null
   const values = chart ? chartValues(observations, chart.observableId) : null
-  const caption = chart ? observationCaption(observations, chart.observableId) : null
+  const caption = objectiveFinding ?? (chart ? observationCaption(observations, chart.observableId) : null)
   const status = useMemo(() => {
+    if (objectiveLoading) return 'Searching boundary-weighted adversarial inputs…'
     if (loadingKey) return 'Evaluating this position…'
     if (evaluationSource === 'fresh') {
       return `Fresh microworld evaluation — not individually ground-truth verified; overall microworld confidence: ${widget?.fidelityBand ?? 'unknown'} (${Math.round((widget?.fidelityConfidence ?? 0) * 100)}%).`
@@ -285,7 +321,7 @@ function App() {
     if (widget) return 'Verified position'
     if (degradation) return 'Analysis stopped before rendering a toy.'
     return 'Preparing analysis…'
-  }, [degradation, evaluationSource, loadingKey, widget])
+  }, [degradation, evaluationSource, loadingKey, objectiveLoading, widget])
 
   const openResponsibleLine = useCallback(() => {
     const responsibleLine = observations?.trace?.responsibleLine
@@ -337,6 +373,19 @@ function App() {
     replacePosition(nextPosition)
   }, [replacePosition])
 
+  const runObjective = useCallback((objective: SearchObjective, unsafePredicate?: UnsafePredicate) => {
+    if (socket.current?.readyState !== WebSocket.OPEN) {
+      setError('The search connection is not ready.')
+      return
+    }
+    socket.current.send(JSON.stringify({
+      type: 'search_objective',
+      requestId: crypto.randomUUID(),
+      objective,
+      unsafePredicate,
+    }))
+  }, [])
+
   return (
     <main className="min-h-screen bg-[var(--lever-background)] px-6 py-6 text-[var(--lever-text)]">
       <div className="mx-auto max-w-6xl space-y-6">
@@ -368,7 +417,15 @@ function App() {
 
         {!degradation && widget && (unionTree !== null || (chart && values)) ? (
           <section className="grid gap-8 lg:grid-cols-[18rem_minmax(0,1fr)]">
-            <KnobPanel controls={widget.controls} />
+            <div className="space-y-4">
+              <KnobPanel controls={widget.controls} />
+              <ObjectiveSelector
+                controls={widget.controls}
+                observableId={chart?.observableId ?? unionTree?.observableId ?? 'result'}
+                disabled={objectiveLoading}
+                onRun={runObjective}
+              />
+            </div>
             <div className="space-y-3">
               <p className="text-sm text-[var(--lever-text)]" aria-live="polite">{status}</p>
               {unionTree ? (
