@@ -66,6 +66,15 @@ class E2BSandboxRuntime(SandboxRuntime):
                 "Creating an E2B sandbox exceeded "
                 f"{self._creation_timeout_seconds:g} seconds; no sandbox was retained."
             ) from error
+        except TimeoutException as error:
+            # E2B can enforce ``request_timeout`` inside its own SDK before the
+            # outer future reaches its deadline.  It is the same creation-time
+            # failure and must not leak a third-party exception to the pipeline.
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise SandboxCreationTimeoutError(
+                "Creating an E2B sandbox exceeded "
+                f"{self._creation_timeout_seconds:g} seconds; no sandbox was retained."
+            ) from error
         except Exception:
             executor.shutdown(wait=True, cancel_futures=True)
             raise

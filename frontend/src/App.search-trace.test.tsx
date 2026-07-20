@@ -30,6 +30,8 @@ const complete: CompleteEvent = {
     presets: [],
     fidelityBand: 'high',
     fidelityConfidence: 0.9,
+    speculative: false,
+    hypothesisCaveat: null,
   },
   positionCache: {
     d7daba113d562e69cfea8947090e4f86746b2466833f63b99d6334b9fe3be499: {

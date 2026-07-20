@@ -14,20 +14,29 @@ from domain.ports import LLMClient
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SCHEMA_NAME = "lever_response"
+_REQUEST_TIMEOUT_SECONDS = 25.0
 
 
 class OpenAIAdapter(LLMClient):
     """Infrastructure implementation of the domain's structured LLM port."""
 
-    def __init__(self, model: str, reasoning_effort: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        reasoning_effort: str | None = None,
+        request_timeout_seconds: float = _REQUEST_TIMEOUT_SECONDS,
+    ) -> None:
         load_dotenv(_PROJECT_ROOT / ".env")
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY must be set in .env or the environment")
+        if request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be positive")
 
-        self._client = OpenAI(api_key=api_key)
+        self._api_key = api_key
         self._model = model
         self._reasoning_effort = reasoning_effort
+        self._request_timeout_seconds = request_timeout_seconds
 
     def complete(self, prompt: str, schema: dict) -> dict:
         request = {
@@ -45,7 +54,16 @@ class OpenAIAdapter(LLMClient):
         if self._reasoning_effort is not None:
             request["reasoning"] = {"effort": self._reasoning_effort}
 
-        response = self._client.responses.create(**request)
+        # A background run can issue a generation call and then a Delta retry.
+        # Never carry a stale HTTP keep-alive connection from one of those calls
+        # into the next.  ``max_retries=0`` makes the 25-second limit an actual
+        # wall-clock bound instead of a per-attempt bound multiplied by SDK retries.
+        with OpenAI(
+            api_key=self._api_key,
+            timeout=self._request_timeout_seconds,
+            max_retries=0,
+        ) as client:
+            response = client.responses.create(**request)
         return json.loads(response.output_text)
 
     @staticmethod

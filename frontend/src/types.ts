@@ -94,6 +94,10 @@ export type WidgetConfig = Readonly<{
   presets: readonly unknown[]
   fidelityBand: 'high' | 'medium' | 'low'
   fidelityConfidence: number
+  /** Rendering discriminator: generated candidates may never use verified UI. */
+  speculative: boolean
+  /** Deterministic disclosure when candidate source misses named hypothesis evidence. */
+  hypothesisCaveat: string | null
 }>
 
 export type ProgressEvent = Readonly<{

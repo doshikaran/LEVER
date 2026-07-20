@@ -22,7 +22,7 @@ export type HonestChartDatum = Readonly<{
  * caller cannot render a comparative chart without showing the measured gap.
  * There is intentionally no y-domain, zoom, or chart-component escape hatch.
  */
-export type HonestChartProps = Readonly<{
+type SharedHonestChartProps = Readonly<{
   data: readonly HonestChartDatum[]
   divergence: number
   title?: string
@@ -30,18 +30,51 @@ export type HonestChartProps = Readonly<{
   onPointClick?: () => void
 }>
 
+/** A verified result can carry Lever's standard confidence claim. */
+type VerifiedChartProps = Readonly<{
+  speculative?: false
+  fidelityBand?: 'high' | 'medium' | 'low'
+}>
+
+/** A generated candidate can never carry the standard verified confidence claim. */
+type ProspectiveChartProps = Readonly<{
+  speculative: true
+  fidelityBand?: never
+  hypothesisCaveat?: string | null
+}>
+
+/**
+ * The rendering mode is a discriminated union, rather than a color choice.
+ * In particular, a speculative chart cannot receive a ``fidelityBand`` and
+ * therefore cannot render the standard Verified badge.
+ */
+export type HonestChartProps = SharedHonestChartProps & (
+  | VerifiedChartProps
+  | ProspectiveChartProps
+)
+
 const ZOOM_DURATION_MS = 3_000
 
 /**
  * The frontend's sole Recharts primitive: comparative, zero-anchored, and
  * explicit about the measured divergence.
  */
-export function HonestChart({
-  data,
-  divergence,
-  title = 'Behavior comparison',
-  onPointClick,
-}: HonestChartProps) {
+function VerifiedFidelityBadge({ band }: Readonly<{ band: NonNullable<VerifiedChartProps['fidelityBand']> }>) {
+  return <span data-testid="verified-fidelity-badge" className="rounded-full bg-emerald-700 px-2 py-1 text-xs font-semibold text-white">Verified · {band}</span>
+}
+
+function ProspectiveBadge() {
+  return <span data-testid="prospective-badge" className="rounded-full bg-blue-700 px-2 py-1 text-xs font-semibold text-white">Prospective</span>
+}
+
+export function HonestChart(props: HonestChartProps) {
+  const {
+    data,
+    divergence,
+    title = 'Behavior comparison',
+    onPointClick,
+  } = props
+  const prospective = props.speculative === true
   const [isZoomed, setIsZoomed] = useState(false)
   const zoomTimer = useRef<number | undefined>(undefined)
 
@@ -75,12 +108,25 @@ export function HonestChart({
 
   return (
     <section aria-label={title} className="rounded-lg border border-[var(--lever-text)]/20 bg-[var(--lever-surface)] p-4 shadow-sm">
-      <header className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-base font-semibold text-[var(--lever-text)]">{title}</h2>
-        <p className="text-sm text-[var(--lever-text)]" aria-live="polite">
-          <span className="font-medium">Divergence: </span>
-          <output>{divergence.toFixed(3)}</output>
-        </p>
+      <header className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-base font-semibold text-[var(--lever-text)]">{title}</h2>
+          {prospective ? (
+            <>
+              <p className="text-sm text-[var(--lever-text)]">Unwritten code — verified against this generated candidate only.</p>
+              {props.hypothesisCaveat ? (
+                <p role="note" data-testid="hypothesis-caveat" className="mt-1 text-sm text-[var(--lever-warning)]">{props.hypothesisCaveat}</p>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+        <div className="flex items-end gap-3">
+          <p className="text-sm text-[var(--lever-text)]" aria-live="polite">
+            <span className="font-medium">Divergence: </span>
+            <output>{divergence.toFixed(3)}</output>
+          </p>
+          {prospective ? <ProspectiveBadge /> : props.fidelityBand ? <VerifiedFidelityBadge band={props.fidelityBand} /> : null}
+        </div>
       </header>
 
       <div className="h-72 w-full">
@@ -107,7 +153,15 @@ export function HonestChart({
               strokeDasharray="6 4"
               dot={false}
             />
-            <Line type="monotone" dataKey="head" name="Head" stroke="var(--lever-primary)" dot={false} />
+            <Line
+              type="monotone"
+              dataKey="head"
+              name={prospective ? 'Candidate' : 'Head'}
+              stroke={prospective ? '#2563eb' : 'var(--lever-primary)'}
+              strokeDasharray={prospective ? '1 4' : undefined}
+              strokeLinecap={prospective ? 'round' : undefined}
+              dot={false}
+            />
           </LineChart>
         </ResponsiveContainer>
       </div>

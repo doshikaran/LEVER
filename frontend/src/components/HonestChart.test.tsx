@@ -87,4 +87,42 @@ describe('HonestChart zoom guardrail', () => {
     expect(head).toMatchObject({ stroke: 'var(--lever-primary)' })
     expect(head?.strokeDasharray).toBeUndefined()
   })
+
+  it('uses the identical zero-anchored axis and required divergence display for a prospective candidate', () => {
+    render(
+      <HonestChart
+        data={[
+          { x: 0, base: 100, head: 150 },
+          { x: 1, base: 120, head: 180 },
+        ]}
+        divergence={0.5}
+        speculative
+        hypothesisCaveat="This candidate may not fully reflect your hypothesis."
+      />,
+    )
+
+    expect(screen.getByTestId('prospective-badge').textContent).toBe('Prospective')
+    expect(screen.getByText(/Unwritten code/)).toBeTruthy()
+    expect(screen.getByTestId('hypothesis-caveat').textContent).toContain('may not fully reflect')
+    expect(screen.getByText('0.500')).toBeTruthy()
+    expect(screen.queryByTestId('verified-fidelity-badge')).toBeNull()
+    expect(yAxisDomains.at(-1)).toEqual([0, 'auto'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom to the difference' }))
+
+    const zoomedDomain = yAxisDomains.at(-1)
+    expect(Array.isArray(zoomedDomain)).toBe(true)
+    if (!Array.isArray(zoomedDomain)) {
+      throw new Error('YAxis did not receive a domain array after prospective zoom.')
+    }
+    expect(zoomedDomain[0]).toBe(0)
+
+    const candidate = lineProps.find((line) => line.dataKey === 'head')
+    expect(candidate).toMatchObject({
+      name: 'Candidate',
+      stroke: '#2563eb',
+      strokeDasharray: '1 4',
+      strokeLinecap: 'round',
+    })
+  })
 })

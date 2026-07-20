@@ -60,7 +60,7 @@ class UnionTreeDescriptor(BaseModel):
 
 
 class WidgetConfig(BaseModel):
-    """Plain serializable data the frontend needs to render a verified widget."""
+    """Plain serializable data the frontend needs to render an honest widget."""
 
     domainPack: Literal["rate-limiter", "permission", "numeric-fn", "decision-tree"]
     thesis: str
@@ -72,6 +72,11 @@ class WidgetConfig(BaseModel):
     presets: list[NamedPosition]
     fidelityBand: Literal["high", "medium", "low"]
     fidelityConfidence: float
+    # This is a rendering-mode discriminator, not a cosmetic flag.  The
+    # frontend must route it to the prospective-only component tree.
+    speculative: bool = False
+    # A deterministic, named-concept caveat about generated source fidelity.
+    hypothesisCaveat: str | None = None
 
 
 def synthesize(
@@ -131,6 +136,8 @@ def synthesize(
         presets=list(spec.presets or []),
         fidelityBand=spec.fidelity.band,
         fidelityConfidence=spec.fidelity.confidence,
+        speculative=spec.provenance.speculative,
+        hypothesisCaveat=spec.provenance.hypothesisCaveat,
     )
 
 

@@ -86,6 +86,7 @@ def run_pipeline(
     progress_callback: Callable[[str, str], None] | None = None,
     adversary_callback: Callable[[AdversaryResult], None] | None = None,
     search_trace_callback: Callable[[TracePoint], None] | None = None,
+    speculative: bool = False,
 ) -> InteractionSpec | DegradeResult:
     """Execute Part 5 and optionally publish real-time search evidence."""
     base_path = Path(base_file_path)
@@ -357,6 +358,7 @@ def run_pipeline(
                     model,
                     reasoning_effort,
                     registryCompatibilityKickbacks,
+                    speculative,
                 ),
             )
             # Step 40: Synthesizer validates/mechanically materializes the complete spec.
@@ -426,6 +428,7 @@ def _provenance(
     model: str,
     reasoning_effort: str,
     registryCompatibilityKickbacks: int,
+    speculative: bool = False,
 ) -> Provenance:
     """Populate Orchestrator-owned provenance facts before the completed spec returns."""
     return Provenance(
@@ -435,6 +438,7 @@ def _provenance(
         generatedAt=datetime.now(UTC).isoformat(),
         modelIds={"delta-analyst": f"{model}; reasoning={reasoning_effort}"},
         harnessSourceUri=f"sandbox://{sandbox_id}/lever-pipeline",
+        speculative=speculative,
         registryCompatibilityKickbacks=registryCompatibilityKickbacks,
     )
 

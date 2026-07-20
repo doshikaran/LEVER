@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { HonestChart } from './components/HonestChart'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { MicroworldCanvas } from './components/MicroworldCanvas'
 import { KnobPanel } from './components/KnobPanel'
 import { DegradationPanel } from './components/DegradationPanel'
 import { SourceViewer } from './components/SourceViewer'
@@ -122,6 +122,8 @@ function App() {
   const [pinStatus, setPinStatus] = useState<string | null>(null)
   const [objectiveLoading, setObjectiveLoading] = useState(false)
   const [objectiveFinding, setObjectiveFinding] = useState<string | null>(null)
+  const [hypothesis, setHypothesis] = useState('')
+  const [prospectivePending, setProspectivePending] = useState(false)
   const socket = useRef<WebSocket | null>(null)
   const pendingRequests = useRef(new Map<string, PendingRequest>())
   const positionVersion = useRef(0)
@@ -157,6 +159,120 @@ function App() {
     socket.current.send(JSON.stringify({ type: 'evaluate', requestId, position: nextPosition }))
   }, [])
 
+  const connectToChange = useCallback((nextChangeId: string) => {
+    socket.current?.close()
+    const nextSocket = new WebSocket(`${socketBase(API_BASE)}/ws/${nextChangeId}`)
+    socket.current = nextSocket
+    nextSocket.onmessage = (message) => {
+      const event = JSON.parse(message.data) as { type?: unknown }
+      if (event.type === 'progress') {
+        setProgress((current) => [...current, event as ProgressEvent])
+        return
+      }
+      if (event.type === 'search_trace') {
+        const traceEvent = event as SearchTraceEvent
+        setSearchTrace((current) => [...current, traceEvent.tracePoint])
+        return
+      }
+      if (event.type === 'complete') {
+        const complete = event as CompleteEvent
+        replaceCache(new Map(Object.entries(complete.positionCache)))
+        replacePosition(selectedTracePosition.current ?? complete.widgetConfig.initialPosition)
+        setDegradation(null)
+        setWidget(complete.widgetConfig)
+        setChangeId(complete.changeId)
+        setSourceFiles(complete.sourceFiles)
+        setObservedPosition(null)
+        setSelectedLine(null)
+        setAttributionMessage(null)
+        setPinStatus(null)
+        setEvaluationSource(null)
+        setObjectiveLoading(false)
+        setObjectiveFinding(null)
+        setProspectivePending(false)
+        return
+      }
+      if (isDegradationEvent(event)) {
+        setDegradation(event)
+        setWidget(null)
+        setChangeId(null)
+        setObservations(null)
+        setObservedPosition(null)
+        setLoadingKey(null)
+        setEvaluationSource(null)
+        setSourceFiles({})
+        setSelectedLine(null)
+        setAttributionMessage(null)
+        setPinStatus(null)
+        setSearchTrace([])
+        selectedTracePosition.current = null
+        replacePosition({})
+        replaceCache(new Map())
+        setError(null)
+        setObjectiveLoading(false)
+        setObjectiveFinding(null)
+        setProspectivePending(false)
+        return
+      }
+      if (event.type === 'evaluation') {
+        const evaluation = event as EvaluationEvent
+        const pending = pendingRequests.current.get(evaluation.requestId)
+        pendingRequests.current.delete(evaluation.requestId)
+        putCachedObservation(evaluation.positionKey, evaluation.observations)
+        if (pending?.version === positionVersion.current) {
+          setObservations(evaluation.observations)
+          setObservedPosition(pending.position)
+          setEvaluationSource(evaluation.source)
+          setLoadingKey(null)
+          setSelectedLine(null)
+          setAttributionMessage(null)
+        }
+        return
+      }
+      if (event.type === 'evaluation_error') {
+        const failed = event as { requestId?: string; error?: string }
+        pendingRequests.current.delete(failed.requestId ?? '')
+        setLoadingKey(null)
+        setError(failed.error ?? 'Position evaluation failed.')
+        return
+      }
+      if (event.type === 'objective_started') {
+        setSearchTrace([])
+        setObjectiveLoading(true)
+        setObjectiveFinding(null)
+        return
+      }
+      if (event.type === 'objective_result') {
+        const result = event as ObjectiveResultEvent
+        replaceCache(new Map(Object.entries(result.positionCache)))
+        setObjectiveLoading(false)
+        if (result.surpriseMarker !== null) {
+          selectedTracePosition.current = { ...result.surpriseMarker.position }
+          replacePosition(result.surpriseMarker.position)
+          setObjectiveFinding(result.surpriseMarker.caption)
+        } else {
+          setObjectiveFinding(result.reason ?? 'No unsafe state was reached.')
+        }
+        return
+      }
+      if (event.type === 'objective_error') {
+        const failed = event as { error?: string }
+        setObjectiveLoading(false)
+        setError(failed.error ?? 'Security search failed.')
+        return
+      }
+      if (event.type === 'error') {
+        const failed = event as { error?: string }
+        setProspectivePending(false)
+        setError(failed.error ?? 'Lever could not produce an interactive result.')
+      }
+    }
+    nextSocket.onerror = () => {
+      setProspectivePending(false)
+      setError('The WebSocket connection failed.')
+    }
+  }, [putCachedObservation, replaceCache, replacePosition])
+
   useEffect(() => {
     const controller = new AbortController()
     let disposed = false
@@ -171,111 +287,7 @@ function App() {
         })
         if (!response.ok) throw new Error(`Diff request failed (${response.status}).`)
         const { changeId } = (await response.json()) as { changeId: string }
-        const nextSocket = new WebSocket(`${socketBase(API_BASE)}/ws/${changeId}`)
-        socket.current = nextSocket
-
-        nextSocket.onmessage = (message) => {
-          const event = JSON.parse(message.data) as { type?: unknown }
-          if (event.type === 'progress') {
-            setProgress((current) => [...current, event as ProgressEvent])
-            return
-          }
-          if (event.type === 'search_trace') {
-            const traceEvent = event as SearchTraceEvent
-            setSearchTrace((current) => [...current, traceEvent.tracePoint])
-            return
-          }
-          if (event.type === 'complete') {
-            const complete = event as CompleteEvent
-            replaceCache(new Map(Object.entries(complete.positionCache)))
-            replacePosition(selectedTracePosition.current ?? complete.widgetConfig.initialPosition)
-            setDegradation(null)
-            setWidget(complete.widgetConfig)
-            setChangeId(complete.changeId)
-            setSourceFiles(complete.sourceFiles)
-            setObservedPosition(null)
-            setSelectedLine(null)
-            setAttributionMessage(null)
-            setPinStatus(null)
-            setEvaluationSource(null)
-            setObjectiveLoading(false)
-            setObjectiveFinding(null)
-            return
-          }
-          if (isDegradationEvent(event)) {
-            setDegradation(event)
-            setWidget(null)
-            setChangeId(null)
-            setObservations(null)
-            setObservedPosition(null)
-            setLoadingKey(null)
-            setEvaluationSource(null)
-            setSourceFiles({})
-            setSelectedLine(null)
-            setAttributionMessage(null)
-            setPinStatus(null)
-            setSearchTrace([])
-            selectedTracePosition.current = null
-            replacePosition({})
-            replaceCache(new Map())
-            setError(null)
-            setObjectiveLoading(false)
-            setObjectiveFinding(null)
-            return
-          }
-          if (event.type === 'evaluation') {
-            const evaluation = event as EvaluationEvent
-            const pending = pendingRequests.current.get(evaluation.requestId)
-            pendingRequests.current.delete(evaluation.requestId)
-            putCachedObservation(evaluation.positionKey, evaluation.observations)
-            if (pending?.version === positionVersion.current) {
-              setObservations(evaluation.observations)
-              setObservedPosition(pending.position)
-              setEvaluationSource(evaluation.source)
-              setLoadingKey(null)
-              setSelectedLine(null)
-              setAttributionMessage(null)
-            }
-            return
-          }
-          if (event.type === 'evaluation_error') {
-            const failed = event as { requestId?: string; error?: string }
-            pendingRequests.current.delete(failed.requestId ?? '')
-            setLoadingKey(null)
-            setError(failed.error ?? 'Position evaluation failed.')
-            return
-          }
-          if (event.type === 'objective_started') {
-            setSearchTrace([])
-            setObjectiveLoading(true)
-            setObjectiveFinding(null)
-            return
-          }
-          if (event.type === 'objective_result') {
-            const result = event as ObjectiveResultEvent
-            replaceCache(new Map(Object.entries(result.positionCache)))
-            setObjectiveLoading(false)
-            if (result.surpriseMarker !== null) {
-              selectedTracePosition.current = { ...result.surpriseMarker.position }
-              replacePosition(result.surpriseMarker.position)
-              setObjectiveFinding(result.surpriseMarker.caption)
-            } else {
-              setObjectiveFinding(result.reason ?? 'No unsafe state was reached.')
-            }
-            return
-          }
-          if (event.type === 'objective_error') {
-            const failed = event as { error?: string }
-            setObjectiveLoading(false)
-            setError(failed.error ?? 'Security search failed.')
-            return
-          }
-          if (event.type === 'error') {
-            const failed = event as { error?: string }
-            setError(failed.error ?? 'Lever could not produce an interactive result.')
-          }
-        }
-        nextSocket.onerror = () => setError('The WebSocket connection failed.')
+        connectToChange(changeId)
       } catch (reason) {
         if (!disposed) setError(reason instanceof Error ? reason.message : 'Could not start Lever.')
       }
@@ -287,7 +299,7 @@ function App() {
       controller.abort()
       socket.current?.close()
     }
-  }, [putCachedObservation, replaceCache, replacePosition])
+  }, [connectToChange])
 
   useEffect(() => {
     if (widget === null || degradation !== null || Object.keys(position).length === 0) return
@@ -386,6 +398,35 @@ function App() {
     }))
   }, [])
 
+  const submitProspective = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!hypothesis.trim()) return
+    try {
+      setError(null)
+      setProgress([])
+      setSearchTrace([])
+      setWidget(null)
+      setDegradation(null)
+      setObservations(null)
+      setObservedPosition(null)
+      setEvaluationSource(null)
+      setObjectiveFinding(null)
+      setProspectivePending(true)
+      const response = await fetch(`${API_BASE}/prospective`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ base_file_path: HERO_1.base_file_path, hypothesis }),
+      })
+      if (!response.ok) throw new Error(`Prospective request failed (${response.status}).`)
+      const { changeId: prospectiveChangeId } = await response.json() as { changeId: string }
+      setChangeId(prospectiveChangeId)
+      connectToChange(prospectiveChangeId)
+    } catch (reason) {
+      setProspectivePending(false)
+      setError(reason instanceof Error ? reason.message : 'Could not start prospective analysis.')
+    }
+  }, [connectToChange, hypothesis])
+
   return (
     <main className="min-h-screen bg-[var(--lever-background)] px-6 py-6 text-[var(--lever-text)]">
       <div className="mx-auto max-w-6xl space-y-6">
@@ -395,8 +436,25 @@ function App() {
           <p className="max-w-3xl text-[var(--lever-text)]">
             {degradation
               ? 'Lever stopped before rendering a toy.'
-              : widget?.thesis ?? 'Preparing the verified rate-limiter comparison…'}
+              : widget?.thesis ?? (prospectivePending
+                ? 'Generating one executable candidate from unwritten code…'
+                : 'Preparing the verified rate-limiter comparison…')}
           </p>
+          <form onSubmit={(event) => void submitProspective(event)} className="max-w-3xl rounded-lg border border-blue-700/30 bg-blue-50 p-3 text-slate-900">
+            <label htmlFor="prospective-hypothesis" className="block text-sm font-semibold">Prospective hypothesis</label>
+            <p className="mt-1 text-xs">Generate one executable candidate from unwritten code, then compare it with current behavior.</p>
+            <div className="mt-2 flex gap-2">
+              <input
+                id="prospective-hypothesis"
+                aria-label="Prospective hypothesis"
+                value={hypothesis}
+                onChange={(event) => setHypothesis(event.target.value)}
+                placeholder="What if the burst allowance were per-tenant instead of shared?"
+                className="min-w-0 flex-1 rounded border border-blue-700/40 bg-white px-3 py-2 text-sm"
+              />
+              <button type="submit" disabled={!hypothesis.trim()} className="rounded bg-blue-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">Generate candidate</button>
+            </div>
+          </form>
         </header>
 
         <ol aria-label="Analysis progress" className="space-y-1 text-sm text-[var(--lever-text)]">
@@ -431,7 +489,8 @@ function App() {
               {unionTree ? (
                 <UnionTree tree={unionTree} />
               ) : chart && values ? (
-                <HonestChart
+                <MicroworldCanvas
+                  widget={widget}
                   title={chart.label}
                   divergence={values.divergence}
                   data={[{ x: 'Current position', base: values.base, head: values.head }]}

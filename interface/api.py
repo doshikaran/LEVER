@@ -21,6 +21,7 @@ from domain.line_attribution import trace_attribution
 from domain.orchestrator import DegradeResult, GracefulDegradation
 from domain.ports import LLMClient, Repository, SandboxRuntime
 from domain.pin_as_test import write_pinned_head_test
+from domain.prospective import CandidateGenerationError, generate_candidate
 from domain.schema import (
     InteractionSpec,
     AdversaryObjective,
@@ -42,6 +43,9 @@ DEFAULT_MODEL = os.getenv("LEVER_MODEL", "gpt-5.6-sol")
 DEFAULT_REASONING_EFFORT = os.getenv("LEVER_REASONING_EFFORT", "high")
 DEFAULT_SESSION_DATABASE_PATH = Path(
     os.getenv("LEVER_SESSION_DATABASE", "data/lever-sessions.sqlite3")
+)
+DEFAULT_PROSPECTIVE_CANDIDATE_DIRECTORY = Path(
+    os.getenv("LEVER_PROSPECTIVE_CANDIDATES", "data/prospective-candidates")
 )
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HERO_FIXTURES: dict[str, tuple[Path, Path]] = {
@@ -89,6 +93,13 @@ class RawDiffRequest(BaseModel):
     """A context-free raw diff that must degrade before static analysis begins."""
 
     diff: str = Field(min_length=1)
+
+
+class ProspectiveRequest(BaseModel):
+    """One plain-language hypothesis about a readable current Python module."""
+
+    base_file_path: str
+    hypothesis: str = Field(min_length=1, max_length=4_000)
 
 
 class DiffAccepted(BaseModel):
@@ -179,6 +190,8 @@ def create_app(
     repository: Repository | None = None,
     database_path: str | Path | None = None,
     pinned_tests_dir: str | Path | None = None,
+    prospective_candidate_dir: str | Path | None = None,
+    prospective_pipeline_runner: PipelineRunner | None = None,
     model: str = DEFAULT_MODEL,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
 ) -> FastAPI:
@@ -189,6 +202,12 @@ def create_app(
     evaluation_runner = evaluation_runner or _evaluate_position
     repository = repository or SQLiteRepository(database_path or DEFAULT_SESSION_DATABASE_PATH)
     pinned_tests_dir = Path(pinned_tests_dir or (_PROJECT_ROOT / "pinned_tests"))
+    prospective_candidate_dir = Path(
+        prospective_candidate_dir or DEFAULT_PROSPECTIVE_CANDIDATE_DIRECTORY
+    )
+    prospective_pipeline_runner = (
+        prospective_pipeline_runner or _run_prospective_pipeline_with_callbacks
+    )
     app = FastAPI(title="Lever interface")
     app.add_middleware(
         CORSMiddleware,
@@ -200,6 +219,7 @@ def create_app(
     app.state.runs = runs
     app.state.repository = repository
     app.state.pinned_tests_dir = pinned_tests_dir
+    app.state.prospective_candidate_dir = prospective_candidate_dir
 
     @app.post("/diffs", response_model=DiffAccepted, status_code=status.HTTP_202_ACCEPTED)
     async def create_diff(request: DiffRequest) -> DiffAccepted:
@@ -278,6 +298,41 @@ def create_app(
                     {},
                     None,
                 ),
+            )
+        return DiffAccepted(changeId=change_id)
+
+    @app.post("/prospective", response_model=DiffAccepted, status_code=status.HTTP_202_ACCEPTED)
+    async def create_prospective(request: ProspectiveRequest) -> DiffAccepted:
+        """Generate one candidate, then route current-vs-candidate through the normal pipeline."""
+        base_path = Path(request.base_file_path).expanduser().resolve()
+        if not base_path.is_file():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"missingFilePaths": [str(base_path)]},
+            )
+        change_id = _prospective_change_id(base_path, request.hypothesis)
+        if change_id not in runs:
+            state = _RunState(
+                change_id=change_id,
+                base_path=base_path,
+                # This is replaced with the persisted generated candidate before
+                # the existing pipeline starts.
+                head_path=base_path,
+            )
+            runs[change_id] = state
+            state.task = asyncio.create_task(
+                _run_prospective_in_background(
+                    state,
+                    request.hypothesis,
+                    runtime_factory,
+                    llm_factory,
+                    prospective_pipeline_runner,
+                    repository,
+                    prospective_candidate_dir,
+                    model,
+                    reasoning_effort,
+                ),
+                name=f"lever-prospective-{change_id[:12]}",
             )
         return DiffAccepted(changeId=change_id)
 
@@ -469,6 +524,122 @@ async def _run_in_background(
             result,
             state.position_cache,
             _source_files(state.base_path, state.head_path),
+        ),
+    )
+
+
+async def _run_prospective_in_background(
+    state: _RunState,
+    hypothesis: str,
+    runtime_factory: Callable[[], SandboxRuntime],
+    llm_factory: Callable[[str, str], LLMClient],
+    pipeline_runner: PipelineRunner,
+    repository: Repository,
+    candidate_directory: Path,
+    model: str,
+    reasoning_effort: str,
+) -> None:
+    """Create one durable candidate, then reuse the existing pipeline unchanged."""
+    loop = asyncio.get_running_loop()
+
+    def on_progress(stage: str, message: str) -> None:
+        loop.call_soon_threadsafe(state.add_progress, stage, message)
+
+    def on_adversary(result: AdversaryResult) -> None:
+        loop.call_soon_threadsafe(state.set_adversary_result, result)
+
+    def on_search_trace(trace_point: TracePoint) -> None:
+        loop.call_soon_threadsafe(state.add_search_trace_point, trace_point)
+
+    def invoke() -> InteractionSpec | DegradeResult:
+        llm = llm_factory(model, reasoning_effort)
+        candidate = generate_candidate(llm, state.base_path.read_text(), hypothesis)
+        candidate_directory.mkdir(parents=True, exist_ok=True)
+        candidate_path = candidate_directory / f"{state.change_id}.py"
+        candidate_path.write_text(candidate.source, encoding="utf-8")
+        state.head_path = candidate_path
+        result = pipeline_runner(
+            str(state.base_path),
+            str(candidate_path),
+            runtime_factory(),
+            llm,
+            model,
+            reasoning_effort,
+            on_progress,
+            on_adversary,
+            on_search_trace,
+        )
+        # A custom test/adapter runner cannot accidentally erase the type-level
+        # prospective discriminator or named-concept caveat before rendering or
+        # persistence.
+        if isinstance(result, InteractionSpec):
+            return result.model_copy(
+                update={
+                    "provenance": result.provenance.model_copy(
+                        update={
+                            "speculative": True,
+                            "hypothesisCaveat": candidate.hypothesis_caveat,
+                        }
+                    )
+                }
+            )
+        return result
+
+    try:
+        result = await asyncio.to_thread(invoke)
+    except CandidateGenerationError as error:
+        _persist_terminal(
+            state,
+            repository,
+            _terminal_payload(
+                state.change_id,
+                GracefulDegradation(
+                    f"Prospective candidate generation failed: {error}",
+                    plain_explanation=(
+                        "Lever could not turn this hypothesis into executable code. "
+                        "Refine the hypothesis or write the candidate explicitly."
+                    ),
+                ),
+                {},
+            ),
+        )
+        return
+    except Exception as error:
+        _persist_terminal(
+            state,
+            repository,
+            {
+                "type": "error",
+                "changeId": state.change_id,
+                "error": f"{type(error).__name__}: {error}",
+            },
+        )
+        return
+
+    if isinstance(result, InteractionSpec):
+        state.spec = result
+        _persist_terminal(
+            state,
+            repository,
+            _terminal_payload(
+                state.change_id,
+                result,
+                state.position_cache,
+                _source_files(state.base_path, state.head_path),
+            ),
+        )
+        return
+
+    _persist_terminal(
+        state,
+        repository,
+        _terminal_payload(
+            state.change_id,
+            result,
+            state.position_cache,
+            _source_files(state.base_path, state.head_path)
+            if state.head_path != state.base_path
+            else None,
         ),
     )
 
@@ -874,6 +1045,32 @@ def _run_pipeline_with_callbacks(
     )
 
 
+def _run_prospective_pipeline_with_callbacks(
+    base_file_path: str,
+    head_file_path: str,
+    sandbox: SandboxRuntime,
+    llm: LLMClient,
+    model: str,
+    reasoning_effort: str,
+    progress_callback: ProgressCallback,
+    adversary_callback: AdversaryCallback,
+    search_trace_callback: SearchTraceCallback,
+) -> InteractionSpec | DegradeResult:
+    """Run the standard agents against generated head source with explicit provenance."""
+    return orchestrator.run_pipeline(
+        base_file_path,
+        head_file_path,
+        sandbox,
+        llm,
+        model,
+        reasoning_effort,
+        progress_callback=progress_callback,
+        adversary_callback=adversary_callback,
+        search_trace_callback=search_trace_callback,
+        speculative=True,
+    )
+
+
 def _openai_client(model: str, reasoning_effort: str) -> LLMClient:
     """Construct the production LLM adapter only inside the background worker."""
     return OpenAIAdapter(model=model, reasoning_effort=reasoning_effort)
@@ -1048,6 +1245,12 @@ def _request_change_id(base_path: Path, head_path: Path) -> str:
 def _raw_diff_change_id(raw_diff: str) -> str:
     """Give a context-free raw diff a stable permalink ID without pretending it is runnable."""
     return hashlib.sha256(f"raw-diff\0{raw_diff}".encode("utf-8")).hexdigest()
+
+
+def _prospective_change_id(base_path: Path, hypothesis: str) -> str:
+    """Identify one stable current-source/hypothesis candidate request without repo history."""
+    material = b"prospective\0" + base_path.read_bytes() + b"\0" + hypothesis.encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
 
 
 def _validated_position(

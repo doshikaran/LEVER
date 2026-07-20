@@ -30,6 +30,7 @@ from domain.schema import (
     VersionExecutionTrace,
 )
 from infra.persistence.sqlite_adapter import SQLiteRepository
+from infra.fakes.fake_llm import FakeLLMClient
 from interface.api import create_app
 
 
@@ -393,6 +394,75 @@ def test_websocket_objective_search_streams_boundary_trace_and_retains_new_cache
     assert result["noUnsafeState"] is False
     assert result["surpriseMarker"]["caption"].startswith("Unsafe state reached")
     assert len(result["positionCache"]) == 1
+    repository.close()
+
+
+def test_prospective_intake_persists_one_generated_source_and_forces_speculative_provenance(
+    tmp_path,
+) -> None:
+    """Current-vs-candidate reuses the normal pipeline while retaining the generated head."""
+    base = tmp_path / "current.py"
+    base.write_text("class RateLimiter:\n    pass\n")
+    candidate_source = """\
+class RateLimiter:
+    def __init__(self, limit_per_sec: int):
+        self.limit = limit_per_sec
+        self.windows = {}
+
+    def admit(self, tenant_id: str, now: float) -> bool:
+        count = self.windows.get(tenant_id, 0)
+        self.windows[tenant_id] = count + 1
+        return count < self.limit
+"""
+    candidate_dir = tmp_path / "candidates"
+    calls: list[tuple[str, str]] = []
+
+    def prospective_runner(
+        base_path,
+        head_path,
+        sandbox,
+        llm,
+        model,
+        reasoning_effort,
+        progress_callback,
+        adversary_callback,
+        search_trace_callback,
+    ) -> InteractionSpec:
+        calls.append((base_path, head_path))
+        assert Path(head_path).read_text() == candidate_source
+        return _spec()
+
+    repository = SQLiteRepository(tmp_path / "prospective.sqlite3")
+    app = create_app(
+        repository=repository,
+        runtime_factory=lambda: object(),
+        llm_factory=lambda _model, _effort: FakeLLMClient(
+            [{"source": candidate_source, "summary": "Returns candidate behavior."}]
+        ),
+        prospective_pipeline_runner=prospective_runner,
+        prospective_candidate_dir=candidate_dir,
+    )
+    with TestClient(app) as client:
+        accepted = client.post(
+            "/prospective",
+            json={
+                "base_file_path": str(base),
+                "hypothesis": "what if the burst allowance were per-tenant instead of shared?",
+            },
+        )
+        assert accepted.status_code == 202
+        change_id = accepted.json()["changeId"]
+        with client.websocket_connect(f"/ws/{change_id}") as websocket:
+            terminal = websocket.receive_json()
+
+    assert calls == [(str(base), str(candidate_dir / f"{change_id}.py"))]
+    assert terminal["type"] == "complete"
+    assert terminal["interactionSpec"]["provenance"]["speculative"] is True
+    assert terminal["widgetConfig"]["speculative"] is True
+    assert "does not retain a burst-related identifier" in terminal["interactionSpec"]["provenance"]["hypothesisCaveat"]
+    assert "does not retain a burst-related identifier" in terminal["widgetConfig"]["hypothesisCaveat"]
+    assert terminal["sourceFiles"]["head"]["source"] == candidate_source
+    assert (candidate_dir / f"{change_id}.py").read_text() == candidate_source
     repository.close()
 
 

@@ -388,6 +388,8 @@ class Provenance(BaseModel):
     modelIds: dict[str, str]
     harnessSourceUri: str
     forced: bool | None = None
+    speculative: bool = False
+    hypothesisCaveat: str | None = None
     registryCompatibilityKickbacks: int = Field(
         default=0,
         ge=0,

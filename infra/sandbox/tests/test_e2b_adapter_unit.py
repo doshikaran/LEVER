@@ -4,7 +4,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from e2b import CommandExitException, SandboxNotFoundException
+from e2b import CommandExitException, SandboxNotFoundException, TimeoutException
 
 import infra.sandbox.e2b_adapter as e2b_adapter
 from infra.sandbox.e2b_adapter import (
@@ -131,3 +131,23 @@ def test_create_sandbox_times_out_loudly_and_kills_a_late_result(monkeypatch) ->
     time.sleep(0.1)
     assert late_sandbox.killed is True
     assert runtime._sandboxes == {}
+
+
+def test_create_sandbox_translates_an_sdk_creation_timeout(monkeypatch) -> None:
+    """An E2B ``request_timeout`` remains a named Lever creation failure."""
+    def create(**_kwargs):
+        raise TimeoutException("context deadline exceeded")
+
+    runtime = object.__new__(E2BSandboxRuntime)
+    runtime._timeout_seconds = 3600
+    runtime._creation_timeout_seconds = 0.25
+    runtime._sandboxes = {}
+    monkeypatch.setattr(e2b_adapter.Sandbox, "create", create)
+
+    with pytest.raises(
+        SandboxCreationTimeoutError,
+        match="Creating an E2B sandbox exceeded 0.25 seconds; no sandbox was retained.",
+    ) as raised:
+        runtime.create_sandbox("base")
+
+    assert isinstance(raised.value.__cause__, TimeoutException)

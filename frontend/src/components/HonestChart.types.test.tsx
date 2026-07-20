@@ -10,4 +10,11 @@ describe('HonestChart prop contract', () => {
 
     expect(chartWithoutDivergence).toBeDefined()
   })
+
+  it('forbids a prospective chart from receiving the verified confidence claim', () => {
+    // @ts-expect-error The speculative union arm has no fidelityBand field.
+    const speculativeWithVerifiedBadge = <HonestChart data={data} divergence={0.5} speculative fidelityBand="high" />
+
+    expect(speculativeWithVerifiedBadge).toBeDefined()
+  })
 })
