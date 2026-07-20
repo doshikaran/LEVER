@@ -47,7 +47,7 @@ PACK_REGISTRY: Mapping[DomainPackId, PackRegistration] = MappingProxyType(
             ),
         ),
         DomainPackId.DECISION_TREE: PackRegistration(
-            enabled=False,
+            enabled=True,
             arity_contract=(
                 "two to four knobs of any supported type; exactly one pathTrace "
                 "observable; no knob may have axisRole."

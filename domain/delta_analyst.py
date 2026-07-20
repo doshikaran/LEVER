@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from domain.entry_point_registry import entry_point_prompt_contract
 from domain.pack_registry import disabled_pack_error, enabled_arity_contracts
 from domain.ports import LLMClient
 from domain.schema import (
@@ -105,6 +106,19 @@ def _build_prompt(
             "that incompatibility.\n"
         )
 
+    entry_point_contract_instruction = ""
+    if scoped_change_set.entry_point is not None:
+        contract = entry_point_prompt_contract(scoped_change_set.entry_point.fn)
+        if contract is not None:
+            entry_point_contract_instruction = (
+                "\nRegistered executable entry-point contract (hard capability boundary):\n"
+                f"{json.dumps(contract, sort_keys=True)}\n"
+                "When this contract is present, return its primary required knobs "
+                "with their exact IDs and bindings, no extra knobs, and its required "
+                "observable render shape. Do not turn config bindings into driver or "
+                "argument bindings.\n"
+            )
+
     return f"""\
 You are Lever's Delta Analyst. State the behavioral change and draft only the
 InteractionSpec fields thesis, domainPack, knobs, and observables. Output a JSON
@@ -130,7 +144,7 @@ Full InteractionSpec JSON Schema:
 {json.dumps(InteractionSpec.model_json_schema(), sort_keys=True)}
 
 Enabled domain-pack arity contracts (only these packs are selectable):
-{enabled_arity_contracts()}{repair_instruction}{compatibility_instruction}
+{enabled_arity_contracts()}{entry_point_contract_instruction}{repair_instruction}{compatibility_instruction}
 """
 
 

@@ -107,7 +107,7 @@ class ArgumentBinding(BaseModel):
 
 
 class ConfigBinding(BaseModel):
-    """Binds a knob to a dotted key in the stub configuration."""
+    """Binds a knob to a dotted stub-config key or a direct constructor/argument field introduced or changed by the diff; Symmetrist enforces byte identity only for environmental fakes."""
 
     kind: Literal["config"]
     path: str

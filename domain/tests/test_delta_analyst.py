@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from domain.delta_analyst import analyze_delta
+from domain.delta_analyst import _build_prompt, analyze_delta
 from domain.pack_registry import PACK_REGISTRY
 from domain.ports import LLMClient
 from domain.schema import DependencyLedger, DomainPackId, EntryPoint, ScopedChangeSet
@@ -12,6 +12,7 @@ from infra.fakes.fake_llm import FakeLLMClient
 
 
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "hero1"
+HERO4_FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "hero4"
 
 
 @pytest.fixture
@@ -53,7 +54,7 @@ def test_delta_analyst_accepts_valid_rate_limiter_response(
     assert "Scoped base source" in fake.prompts[0]
     assert "Enabled domain-pack arity contracts (only these packs are selectable)" in fake.prompts[0]
     contracts = fake.prompts[0].split("Enabled domain-pack arity contracts", 1)[1]
-    assert "decision-tree:" not in contracts
+    assert "decision-tree:" in contracts
 
 
 def test_delta_analyst_reprompts_once_with_arity_error_then_corrects(
@@ -97,10 +98,10 @@ def test_delta_analyst_exhausts_one_retry_then_uses_numeric_fallback(
     ) in fake.prompts[1]
 
 
-def test_disabled_decision_tree_proposal_is_rejected_then_falls_back_to_numeric_fn(
+def test_enabled_decision_tree_proposal_is_accepted_by_the_pack_registry(
     hero_scope: ScopedChangeSet, hero_sources: tuple[str, str]
 ) -> None:
-    """C-6 makes an enum value for an unbuilt pack unselectable before templating."""
+    """C-6 permits the decision-tree enum only after its executable template exists."""
     decision_tree = {
         "thesis": "A branch changes which route is selected.",
         "domainPack": "decision-tree",
@@ -145,12 +146,37 @@ def test_disabled_decision_tree_proposal_is_rejected_then_falls_back_to_numeric_
             }
         ],
     }
-    fake = FakeLLMClient([decision_tree, decision_tree])
+    fake = FakeLLMClient([decision_tree])
 
     result = analyze_delta(fake, hero_scope, *hero_sources)
 
-    assert PACK_REGISTRY[DomainPackId.DECISION_TREE].enabled is False
-    assert result.domainPack.value == "numeric-fn"
+    assert PACK_REGISTRY[DomainPackId.DECISION_TREE].enabled is True
+    assert result.domainPack.value == "decision-tree"
     assert PACK_REGISTRY[result.domainPack].enabled is True
-    assert len(fake.prompts) == 2
-    assert "decision-tree is disabled and cannot be selected" in fake.prompts[1]
+    assert len(fake.prompts) == 1
+
+
+def test_delta_prompt_exposes_the_registered_execution_contract_generically() -> None:
+    """A registered template supplies exact IDs and config paths before the first draft."""
+    base = (HERO4_FIXTURE_DIR / "base.py").read_text(encoding="utf-8")
+    head = (HERO4_FIXTURE_DIR / "head.py").read_text(encoding="utf-8")
+    scope = ScopedChangeSet(
+        entry_point=EntryPoint(
+            file=str(HERO4_FIXTURE_DIR / "head.py"),
+            fn="should_apply_discount",
+            signature="should_apply_discount(user: User, cart: Cart, now) -> Decimal",
+        ),
+        dependency_ledger=DependencyLedger(),
+    )
+
+    prompt = _build_prompt(scope, base, head, None)
+
+    assert "Registered executable entry-point contract (hard capability boundary):" in prompt
+    assert '"allowedBindingKinds": ["config"]' in prompt
+    assert '"id": "cohort", "type": "enum"' in prompt
+    assert '"kind": "config", "path": "user.cohort"' in prompt
+    assert '"id": "flagState", "type": "enum"' in prompt
+    assert '"kind": "config", "path": "user.flag_state"' in prompt
+    assert '"id": "cartValue", "type": "scalar"' in prompt
+    assert '"kind": "config", "path": "cart.cart_value"' in prompt
+    assert "no extra knobs" in prompt

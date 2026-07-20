@@ -39,6 +39,10 @@ class DegradeResult:
     reason: str
     plain_explanation: str | None = None
     divergence_report: tuple[dict[str, Any], ...] = ()
+    # Keep each validated Delta draft in order when a later pipeline stage
+    # cannot execute it.  This is durable diagnostic evidence, not an inferred
+    # explanation of the failure.
+    proposedSpecs: tuple[dict[str, Any], ...] = ()
     registryCompatibilityKickbacks: int = 0
     kind: str = field(init=False, default="degraded")
 
@@ -132,6 +136,7 @@ def run_pipeline(
         # re-selection total, not one fresh prompt per failure subtype.
         registryCompatibilityKickbacks = 0
         compatibility_feedback: str | None = None
+        proposed_specs: list[dict[str, Any]] = []
         while True:
             if compatibility_feedback is None:
                 partial_spec = DeltaAnalyst(llm).analyze(
@@ -145,6 +150,10 @@ def run_pipeline(
                     compatibility_feedback=compatibility_feedback,
                 )
                 compatibility_feedback = None
+            # Snapshot the validated JSON immediately.  A later kickback may
+            # replace ``partial_spec``, but the Session Ledger must retain both
+            # drafts that led to a terminal degradation.
+            proposed_specs.append(partial_spec.model_dump(mode="json"))
             emit_progress(
                 "old_vs_new",
                 f"Old vs. new: {partial_spec.thesis}",
@@ -174,6 +183,7 @@ def run_pipeline(
                             "an instrumentable source-level reference implementation",
                         ),
                         loop_a_attempts=loop_a_attempt,
+                        proposedSpecs=tuple(proposed_specs),
                         registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                     )
                 except NoHarnessTemplateRegistered:
@@ -184,6 +194,7 @@ def run_pipeline(
                             f"{scoped_change_set.entry_point.fn} yet."
                         ),
                         loop_a_attempts=loop_a_attempt,
+                        proposedSpecs=tuple(proposed_specs),
                         registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                     )
                 except UnsupportedTemplateProposal as error:
@@ -219,6 +230,7 @@ def run_pipeline(
                                 f"the registered {scoped_change_set.entry_point.fn} workload shape",
                             ),
                             loop_a_attempts=loop_a_attempt,
+                            proposedSpecs=tuple(proposed_specs),
                             registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                         )
                     partial_spec = fallback_spec
@@ -233,6 +245,7 @@ def run_pipeline(
                             "the dependency boundary with a real service or a focused integration test",
                         ),
                         loop_a_attempts=loop_a_attempt,
+                        proposedSpecs=tuple(proposed_specs),
                         registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                     )
                 emit_progress(
@@ -262,6 +275,7 @@ def run_pipeline(
                         ),
                         divergence_report=_divergence_report(fidelity),
                         loop_a_attempts=loop_a_attempt,
+                        proposedSpecs=tuple(proposed_specs),
                         registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                     )
                 break
@@ -274,6 +288,7 @@ def run_pipeline(
                     ),
                     divergence_report=_divergence_report(fidelity),
                     loop_a_attempts=MAX_LOOP_A_ATTEMPTS,
+                    proposedSpecs=tuple(proposed_specs),
                     registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                 )
 
@@ -338,7 +353,9 @@ def run_pipeline(
                 ),
             )
             # Step 40: Synthesizer validates/mechanically materializes the complete spec.
-            synthesize(interaction_spec)
+            # Decision trees are reconstructed only from Adversary's existing
+            # empirical cache; Synthesizer may not invent a static CFG.
+            synthesize(interaction_spec, adversary_result.cache)
             return interaction_spec
     finally:
         sandbox.kill_sandbox(sandbox_id)

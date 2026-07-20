@@ -3,6 +3,7 @@ import { HonestChart } from './components/HonestChart'
 import { KnobPanel } from './components/KnobPanel'
 import { DegradationPanel } from './components/DegradationPanel'
 import { SourceViewer } from './components/SourceViewer'
+import { UnionTree } from './components/UnionTree'
 import { useMicroworldStore } from './store/useMicroworldStore'
 import type {
   CompleteEvent,
@@ -260,6 +261,7 @@ function App() {
   }, [degradation, evaluatePosition, position, widget])
 
   const chart = widget === null ? null : widget.charts[0]
+  const unionTree = widget?.unionTree ?? null
   const values = chart ? chartValues(observations, chart.observableId) : null
   const caption = chart ? observationCaption(observations, chart.observableId) : null
   const status = useMemo(() => {
@@ -337,17 +339,21 @@ function App() {
 
         {degradation ? <DegradationPanel event={degradation} /> : null}
 
-        {!degradation && widget && chart && values ? (
+        {!degradation && widget && (unionTree !== null || (chart && values)) ? (
           <section className="grid gap-8 lg:grid-cols-[18rem_minmax(0,1fr)]">
             <KnobPanel controls={widget.controls} />
             <div className="space-y-3">
               <p className="text-sm text-[var(--lever-text)]" aria-live="polite">{status}</p>
-              <HonestChart
-                title={chart.label}
-                divergence={values.divergence}
-                data={[{ x: 'Current position', base: values.base, head: values.head }]}
-                onPointClick={openResponsibleLine}
-              />
+              {unionTree ? (
+                <UnionTree tree={unionTree} />
+              ) : chart && values ? (
+                <HonestChart
+                  title={chart.label}
+                  divergence={values.divergence}
+                  data={[{ x: 'Current position', base: values.base, head: values.head }]}
+                  onPointClick={openResponsibleLine}
+                />
+              ) : null}
               {attributionMessage ? <p role="status" className="text-sm text-[var(--lever-text)]">{attributionMessage}</p> : null}
               <p aria-live="polite" className="text-base font-medium text-[var(--lever-text)]">
                 {caption ?? widget.surpriseMarker?.caption ?? 'Choose a cached position to inspect it.'}

@@ -347,7 +347,7 @@ def test_uninstrumentable_reference_signals_one_orchestrator_reselection(
     monkeypatch.setattr(orchestrator, "HarnessEngineer", FailingThenWorkingHarnessEngineer)
     monkeypatch.setattr(orchestrator, "FidelityVerifier", VerifiedFidelity)
     monkeypatch.setattr(orchestrator, "Adversary", DivergentAdversary)
-    monkeypatch.setattr(orchestrator, "synthesize", lambda _spec: None)
+    monkeypatch.setattr(orchestrator, "synthesize", lambda *_args: None)
 
     result = orchestrator.run_pipeline(
         str(FIXTURE_DIR / "base.py"),
@@ -433,7 +433,7 @@ def test_reference_and_registry_failures_share_one_pipeline_reselection_budget(
     monkeypatch.setattr(orchestrator, "HarnessEngineer", ReferenceThenRegistryFailure)
     monkeypatch.setattr(orchestrator, "FidelityVerifier", VerifiedFidelity)
     monkeypatch.setattr(orchestrator, "Adversary", DivergentAdversary)
-    monkeypatch.setattr(orchestrator, "synthesize", lambda _spec: None)
+    monkeypatch.setattr(orchestrator, "synthesize", lambda *_args: None)
 
     result = orchestrator.run_pipeline(
         str(FIXTURE_DIR / "base.py"),

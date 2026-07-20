@@ -46,6 +46,10 @@ HERO_FIXTURES: dict[str, tuple[Path, Path]] = {
         _PROJECT_ROOT / "fixtures/hero1/base.py",
         _PROJECT_ROOT / "fixtures/hero1/head.py",
     ),
+    "hero4": (
+        _PROJECT_ROOT / "fixtures/hero4/base.py",
+        _PROJECT_ROOT / "fixtures/hero4/head.py",
+    ),
 }
 
 ProgressCallback = Callable[[str, str], None]
@@ -447,7 +451,10 @@ def _terminal_payload(
         return {
             "type": "complete",
             "changeId": change_id,
-            "widgetConfig": synthesize(result).model_dump(mode="json"),
+            "widgetConfig": synthesize(
+                result,
+                _synthesis_cache(position_cache),
+            ).model_dump(mode="json"),
             "positionCache": position_cache,
             "sourceFiles": source_files or {},
             "interactionSpec": result.model_dump(mode="json"),
@@ -458,6 +465,10 @@ def _terminal_payload(
         "degradeReason": result.reason,
         "plainExplanation": result.plain_explanation or _default_plain_explanation(result),
         "divergenceReport": list(result.divergence_report),
+        # Preserve Delta's actual validated drafts for the Show-me diagnostic
+        # expansion.  This makes a compatibility/instrumentation degradation
+        # diagnosable from the persisted Session Ledger alone.
+        "proposedSpecs": list(result.proposedSpecs),
         "outcome": asdict(result),
         "positionCache": position_cache,
     }
@@ -485,12 +496,24 @@ def _cache_from_adversary(result: AdversaryResult) -> dict[str, dict[str, Any]]:
 def _cache_observation(entry: CacheEntry) -> dict[str, Any]:
     """Serialize observations and their driver-collected source attribution."""
     payload: dict[str, Any] = {
+        "position": entry.position.root,
         "base": entry.observations.base,
         "head": entry.observations.head,
     }
     if entry.observations.trace is not None:
         payload["trace"] = entry.observations.trace.model_dump(mode="json")
     return payload
+
+
+def _synthesis_cache(position_cache: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Adapt serialized Adversary cache entries into Synthesizer's empirical tree input."""
+    return [
+        {
+            "position": item.get("position"),
+            "observations": {"base": item.get("base"), "head": item.get("head")},
+        }
+        for item in position_cache.values()
+    ]
 
 
 def _run_hero_pipeline(
@@ -667,9 +690,21 @@ def _evaluate_position(
             partial_spec,
             base_module,
             head_module,
+            base_source,
+            head_source,
         )
-        _stage_source(runtime, sandbox_id, base_module, base_source)
-        _stage_source(runtime, sandbox_id, head_module, head_source)
+        _stage_source(
+            runtime,
+            sandbox_id,
+            base_module,
+            harness_pair.harness_a.instrumented_module_source or base_source,
+        )
+        _stage_source(
+            runtime,
+            sandbox_id,
+            head_module,
+            harness_pair.harness_b.instrumented_module_source or head_source,
+        )
         _stage_source(runtime, sandbox_id, f"{base_module}.harness.py", harness_pair.harness_a.source)
         _stage_source(runtime, sandbox_id, f"{head_module}.harness.py", harness_pair.harness_b.source)
         base_result = _run_harness(
@@ -685,8 +720,8 @@ def _evaluate_position(
         trace = trace_attribution(
             base_result.get("trace"),
             head_result.get("trace"),
-            base_source,
-            head_source,
+            harness_pair.harness_a.instrumented_module_source or base_source,
+            harness_pair.harness_b.instrumented_module_source or head_source,
         )
         if trace is not None:
             payload["trace"] = trace.model_dump(mode="json")

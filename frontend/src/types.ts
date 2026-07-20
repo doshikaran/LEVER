@@ -45,6 +45,8 @@ export type TraceAttribution = Readonly<{
 }>
 
 export type ObservationBundle = Readonly<{
+  /** Present for persisted Adversary cache entries, not required for fresh evaluation replies. */
+  position?: KnobPosition
   base: Record<string, unknown>
   head: Record<string, unknown>
   trace?: TraceAttribution
@@ -69,6 +71,20 @@ export type WidgetConfig = Readonly<{
     unit: string | null
     yAxisZeroAnchored: true
   }>[]
+  unionTree?: Readonly<{
+    observableId: string
+    label: string
+    render: 'unionTree'
+    nodes: readonly Readonly<{
+      tag: string
+      baseOutcomes: readonly boolean[]
+      headOutcomes: readonly boolean[]
+      positions: readonly KnobPosition[]
+      baseTouched: boolean
+      headTouched: boolean
+    }>[]
+    forkTag: string | null
+  }> | null
   initialPosition: KnobPosition
   surpriseMarker: Readonly<{
     position: KnobPosition

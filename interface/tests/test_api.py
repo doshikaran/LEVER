@@ -229,6 +229,7 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
     assert all(len(position_hash) == 64 for position_hash in final["positionCache"])
     assert list(final["positionCache"].values()) == [
         {
+            "position": {"rps": 3.0},
             "base": {"admitted": 1},
             "head": {"admitted": 2},
             "trace": {
@@ -270,8 +271,12 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
     repository.close()
 
 
+@pytest.mark.parametrize(
+    ("hero_id", "hero_key"),
+    (("hero1", "hero:hero1"), ("hero4", "hero:hero4")),
+)
 def test_hero_result_is_frozen_without_reinvoking_orchestrator(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, hero_id: str, hero_key: str
 ) -> None:
     """A pinned hero calls the real adapter's run_pipeline seam exactly once."""
     database_path = tmp_path / "hero-sessions.sqlite3"
@@ -322,13 +327,13 @@ def test_hero_result_is_frozen_without_reinvoking_orchestrator(
         llm_factory=lambda model, effort: object(),
     )
     with TestClient(first_app) as client:
-        first = client.post("/heroes/hero1/run")
-        second = client.post("/heroes/hero1/run")
+        first = client.post(f"/heroes/{hero_id}/run")
+        second = client.post(f"/heroes/{hero_id}/run")
 
     assert first.status_code == 200
     assert second.status_code == 200
     assert first.json() == second.json()
-    assert first.json()["changeId"] == "hero:hero1"
+    assert first.json()["changeId"] == hero_key
     assert calls == 1
     first_repository.close()
 
@@ -339,7 +344,7 @@ def test_hero_result_is_frozen_without_reinvoking_orchestrator(
         llm_factory=lambda model, effort: object(),
     )
     with TestClient(restarted_app) as client:
-        after_restart = client.post("/heroes/hero1/run")
+        after_restart = client.post(f"/heroes/{hero_id}/run")
 
     assert after_restart.status_code == 200
     assert after_restart.json() == first.json()
@@ -350,7 +355,20 @@ def test_hero_result_is_frozen_without_reinvoking_orchestrator(
 @pytest.mark.parametrize(
     ("terminal_result", "expected_kind"),
     [
-        (GracefulDegradation("Fidelity could not agree."), "degraded"),
+        (
+            GracefulDegradation(
+                "Fidelity could not agree.",
+                proposedSpecs=(
+                    {
+                        "thesis": "A captured Delta draft.",
+                        "domainPack": "numeric-fn",
+                        "knobs": [],
+                        "observables": [],
+                    },
+                ),
+            ),
+            "degraded",
+        ),
         (InertResult("No divergence found."), "inert"),
         (UnscopableResult("`view` requires live framework parameter `request`"), "unscopable"),
         (SkippedResult("formatting only"), "skipped"),
@@ -394,5 +412,6 @@ def test_degraded_and_inert_terminal_results_are_persisted(
     assert terminal["type"] == expected_kind
     assert terminal["degradeReason"] == terminal_result.reason
     assert terminal["outcome"]["kind"] == expected_kind
+    assert terminal["proposedSpecs"] == list(terminal_result.proposedSpecs)
     assert persisted.json() == terminal
     repository.close()

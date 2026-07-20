@@ -67,6 +67,26 @@ class ProposalShape:
     numeric_fallback_requirements: tuple["KnobRequirement", ...] = ()
     numeric_fallback_render: str | None = None
 
+    def prompt_contract(self, entry_point_fn: str) -> dict[str, Any]:
+        """Describe the registered execution shape for Delta's provider-neutral prompt."""
+        contract: dict[str, Any] = {
+            "entryPoint": entry_point_fn,
+            "workload": self.workload_description,
+            "allowedBindingKinds": sorted(self.allowed_binding_kinds),
+            "requiredKnobs": _requirements_prompt_contract(self.required_knobs),
+            "requireExactKnobIds": self.require_exact_knob_ids,
+            "requiredObservableRender": self.required_observable_render,
+        }
+        if self.numeric_fallback_requirements:
+            contract["numericFallback"] = {
+                "requiredKnobs": _requirements_prompt_contract(
+                    self.numeric_fallback_requirements
+                ),
+                "requireExactKnobIds": True,
+                "requiredObservableRender": self.numeric_fallback_render,
+            }
+        return contract
+
     def incompatibility_reason(
         self,
         entry_point_fn: str,
@@ -129,6 +149,7 @@ class KnobRequirement:
     type: str | None = None
     axis_role: str | None = None
     binding_kind: str | None = None
+    config_path: str | None = None
 
     def describe_failure(self, knob: Knob | None) -> str | None:
         """Return a concrete mismatch without forcing a template to consume it."""
@@ -141,7 +162,33 @@ class KnobRequirement:
             return f"knob {self.id} must have {expected}"
         if self.binding_kind is not None and knob.binding.kind != self.binding_kind:
             return f"knob {self.id} must use a {self.binding_kind} binding"
+        if (
+            self.config_path is not None
+            and knob.binding.kind == "config"
+            and knob.binding.path != self.config_path
+        ):
+            return f"knob {self.id} must bind config path {self.config_path}"
         return None
+
+
+def _requirements_prompt_contract(
+    requirements: tuple[KnobRequirement, ...],
+) -> list[dict[str, Any]]:
+    """Serialize only the binding facts a registered template can actually consume."""
+    serialized: list[dict[str, Any]] = []
+    for requirement in requirements:
+        item: dict[str, Any] = {"id": requirement.id}
+        if requirement.type is not None:
+            item["type"] = requirement.type
+        if requirement.axis_role is not None:
+            item["axisRole"] = requirement.axis_role
+        if requirement.binding_kind is not None:
+            binding: dict[str, str] = {"kind": requirement.binding_kind}
+            if requirement.config_path is not None:
+                binding["path"] = requirement.config_path
+            item["binding"] = binding
+        serialized.append(item)
+    return serialized
 
 
 def _requirement_failures(
@@ -700,6 +747,133 @@ def _hero3_numeric_fn_fallback() -> PartialInteractionSpec:
     )
 
 
+_HERO4_HARNESS_TEMPLATE = """\\
+import importlib.util
+import json
+import os
+import sys
+from datetime import datetime
+from decimal import Decimal
+
+MODULE_PATH = __MODULE_PATH__
+ENTRY_POINT = __ENTRY_POINT__
+DEFAULT_CONFIG = __DEFAULT_CONFIG__
+STUB_CONFIG = __STUB_CONFIG__
+OBSERVABLES = __OBSERVABLES__
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location("lever_target", MODULE_PATH)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot import target module from {MODULE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def run(config=None, seed=0):
+    config = dict(DEFAULT_CONFIG if config is None else config)
+    module = _load_module()
+    entry_callable = module
+    for part in ENTRY_POINT.split("."):
+        entry_callable = getattr(entry_callable, part)
+    entry_code = getattr(entry_callable, "__code__", None)
+    target_module_path = os.path.abspath(MODULE_PATH)
+    executed_lines = set()
+    entry_lines = set()
+    line_hits = {}
+
+    def trace_lines(frame, event, _arg):
+        if event == "line" and os.path.abspath(frame.f_code.co_filename) == target_module_path:
+            executed_lines.add(frame.f_lineno)
+            line_hits[frame.f_lineno] = line_hits.get(frame.f_lineno, 0) + 1
+            if entry_code is not None and frame.f_code is entry_code:
+                entry_lines.add(frame.f_lineno)
+        return trace_lines
+
+    cohort = str(config.get("cohort", "control"))
+    flag_state = str(config.get("flagState", "off"))
+    cart_value = Decimal(str(config.get("cartValue", "0")))
+    # ``now`` is a genuine data argument, supplied at one shared fixed instant.
+    now = datetime(2026, 6, 15)
+    previous_trace = sys.gettrace()
+    sys.settrace(trace_lines)
+    try:
+        discount = entry_callable(
+            module.User(cohort=cohort, flag_state=flag_state),
+            module.Cart(cart_value=cart_value),
+            now,
+        )
+    finally:
+        sys.settrace(previous_trace)
+
+    return {
+        "entry_point": ENTRY_POINT,
+        "inputs": {
+            "cohort": cohort,
+            "flagState": flag_state,
+            "cartValue": str(cart_value),
+        },
+        "observations": {observable["id"]: str(discount) for observable in OBSERVABLES},
+        "stub_config": STUB_CONFIG,
+        "trace": {
+            "file": MODULE_PATH,
+            "executed_lines": sorted(executed_lines),
+            "entry_lines": sorted(entry_lines),
+            "line_hits": {str(line): line_hits[line] for line in sorted(line_hits)},
+        },
+    }
+
+
+if __name__ == "__main__":
+    print(json.dumps(run(), sort_keys=True))
+"""
+
+
+def _hero4_harness_body(request: HarnessBodyRequest) -> str:
+    """Render the direct-data feature-flag invocation for ``should_apply_discount``."""
+    replacements = {
+        "__ENTRY_POINT__": json.dumps(request.entry_point_fn),
+        "__DEFAULT_CONFIG__": repr(request.default_config),
+        "__STUB_CONFIG__": repr(request.stub_config),
+        "__OBSERVABLES__": repr(request.observables),
+    }
+    source = _HERO4_HARNESS_TEMPLATE.replace("__MODULE_PATH__", json.dumps(request.module_path))
+    for token, value in replacements.items():
+        source = source.replace(token, value)
+    return source
+
+
+def _hero4_reference_program(request: ReferenceProgramRequest) -> str:
+    """Invoke Hero 4's real pricing function directly, without importing a harness."""
+    defaults = {knob.id: knob.default for knob in request.knobs}
+    observable_ids = [observable.id for observable in request.observables]
+    return f"""\\
+import importlib.util
+import json
+from datetime import datetime
+from decimal import Decimal
+
+config = dict({defaults!r})
+config.update(json.loads({json.dumps(json.dumps(request.point))}))
+spec = importlib.util.spec_from_file_location("lever_reference", {request.module_path!r})
+if spec is None or spec.loader is None:
+    raise ImportError("Cannot import reference module")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+discount = module.should_apply_discount(
+    module.User(
+        cohort=str(config.get("cohort", "control")),
+        flag_state=str(config.get("flagState", "off")),
+    ),
+    module.Cart(cart_value=Decimal(str(config.get("cartValue", "0")))),
+    datetime(2026, 6, 15),
+)
+OBSERVATIONS = {{observable_id: str(discount) for observable_id in {observable_ids!r}}}
+"""
+
+
 ENTRY_POINT_REGISTRY: Mapping[str, EntryPointTemplate] = MappingProxyType(
     {
         "RateLimiter.admit": EntryPointTemplate(
@@ -761,6 +935,38 @@ ENTRY_POINT_REGISTRY: Mapping[str, EntryPointTemplate] = MappingProxyType(
             ),
             numeric_fallback=_hero3_numeric_fn_fallback,
         ),
+        "should_apply_discount": EntryPointTemplate(
+            harness_body=_hero4_harness_body,
+            reference_program=_hero4_reference_program,
+            proposal_shape=ProposalShape(
+                workload_description="a feature-flag branch-trace workload",
+                required_driver_params=(),
+                allowed_binding_kinds=frozenset({"config"}),
+                required_knobs=(
+                    KnobRequirement(
+                        "cohort",
+                        type="enum",
+                        binding_kind="config",
+                        config_path="user.cohort",
+                    ),
+                    KnobRequirement(
+                        "flagState",
+                        type="enum",
+                        binding_kind="config",
+                        config_path="user.flag_state",
+                    ),
+                    KnobRequirement(
+                        "cartValue",
+                        type="scalar",
+                        binding_kind="config",
+                        config_path="cart.cart_value",
+                    ),
+                ),
+                require_exact_knob_ids=True,
+                required_observable_render="pathTrace",
+                expected_control_ids=("cohort", "flagState", "cartValue"),
+            ),
+        ),
     }
 )
 
@@ -770,6 +976,14 @@ def get_entry_point_template(entry_point_fn: str) -> EntryPointTemplate | None:
     return ENTRY_POINT_REGISTRY.get(entry_point_fn)
 
 
+def entry_point_prompt_contract(entry_point_fn: str) -> dict[str, Any] | None:
+    """Return the executable proposal contract for a registered entry point, if any."""
+    template = get_entry_point_template(entry_point_fn)
+    if template is None:
+        return None
+    return template.proposal_shape.prompt_contract(entry_point_fn)
+
+
 __all__ = [
     "ENTRY_POINT_REGISTRY",
     "EntryPointTemplate",
@@ -777,5 +991,6 @@ __all__ = [
     "KnobRequirement",
     "ProposalShape",
     "ReferenceProgramRequest",
+    "entry_point_prompt_contract",
     "get_entry_point_template",
 ]

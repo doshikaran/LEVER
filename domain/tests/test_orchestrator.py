@@ -6,6 +6,7 @@ import domain.orchestrator as orchestrator
 from domain.adversary import AdversaryResult
 from domain.fidelity_verifier import FidelityVerification
 from domain.harness_engineer import HarnessEngineer as RealHarnessEngineer
+from domain.line_attribution import UninstrumentableReferenceError
 from domain.schema import (
     Agreement,
     Coverage,
@@ -343,10 +344,10 @@ def test_unregistered_entry_point_returns_graceful_degradation_without_execution
 def test_live_hero2_numeric_fn_proposal_kicks_back_then_degrades_without_execution() -> None:
     """An unservable direct call gets one re-selection before an honest degradation."""
     runtime = FakeSandboxRuntime()
-    llm = FakeLLMClient([
-        _live_hero2_numeric_fn_response(),
-        _live_hero2_numeric_fn_response(),
-    ])
+    first_proposal = _live_hero2_numeric_fn_response()
+    second_proposal = _live_hero2_numeric_fn_response()
+    second_proposal["thesis"] = "The retry proposal after registry compatibility feedback."
+    llm = FakeLLMClient([first_proposal, second_proposal])
     result = orchestrator.run_pipeline(
         str(HERO2_FIXTURE_DIR / "base.py"),
         str(HERO2_FIXTURE_DIR / "head.py"),
@@ -367,6 +368,52 @@ def test_live_hero2_numeric_fn_proposal_kicks_back_then_degrades_without_executi
     assert not runtime.run_calls
     assert len(llm.prompts) == 2
     assert "registered template for 'next_delay' expects a concurrent-retry workload" in llm.prompts[1]
+    assert [proposal["thesis"] for proposal in result.proposedSpecs] == [
+        first_proposal["thesis"],
+        second_proposal["thesis"],
+    ]
+    assert [knob["binding"] for knob in result.proposedSpecs[0]["knobs"]] == [
+        knob["binding"] for knob in first_proposal["knobs"]
+    ]
+    assert [knob["binding"] for knob in result.proposedSpecs[1]["knobs"]] == [
+        knob["binding"] for knob in second_proposal["knobs"]
+    ]
+
+
+def test_uninstrumentable_reference_degradation_retains_both_delta_drafts(monkeypatch) -> None:
+    """Both attempts survive the bounded instrumentation kickback in the terminal result."""
+    first_proposal = _valid_response()
+    second_proposal = _valid_response()
+    second_proposal["thesis"] = "The repaired proposal after reference instrumentation feedback."
+
+    class AlwaysUninstrumentableHarnessEngineer:
+        def generate(self, *_args, **_kwargs):
+            raise UninstrumentableReferenceError(
+                "reference path 'extension.so' cannot be branch-instrumented"
+            )
+
+    monkeypatch.setattr(orchestrator, "HarnessEngineer", AlwaysUninstrumentableHarnessEngineer)
+    result = orchestrator.run_pipeline(
+        str(FIXTURE_DIR / "base.py"),
+        str(FIXTURE_DIR / "head.py"),
+        FakeSandboxRuntime(),
+        FakeLLMClient([first_proposal, second_proposal]),
+        "fake-model",
+        "low",
+    )
+
+    assert isinstance(result, orchestrator.GracefulDegradation)
+    assert result.registryCompatibilityKickbacks == 1
+    assert [proposal["thesis"] for proposal in result.proposedSpecs] == [
+        first_proposal["thesis"],
+        second_proposal["thesis"],
+    ]
+    assert [knob["binding"] for knob in result.proposedSpecs[0]["knobs"]] == [
+        knob["binding"] for knob in first_proposal["knobs"]
+    ]
+    assert [knob["binding"] for knob in result.proposedSpecs[1]["knobs"]] == [
+        knob["binding"] for knob in second_proposal["knobs"]
+    ]
 
 
 def test_registry_incompatibility_kicks_back_to_delta_analyst_once(monkeypatch) -> None:
