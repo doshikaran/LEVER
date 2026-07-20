@@ -362,7 +362,7 @@ def test_live_hero2_numeric_fn_proposal_kicks_back_then_degrades_without_executi
         "and the numeric-fn fallback is not executable for this entry point: "
     )
     assert result.loop_a_attempts == 1
-    assert result.registry_compatibility_kickbacks == 1
+    assert result.registryCompatibilityKickbacks == 1
     assert runtime.created_templates == ["base"]
     assert not runtime.run_calls
     assert len(llm.prompts) == 2
@@ -393,7 +393,7 @@ def test_registry_incompatibility_kicks_back_to_delta_analyst_once(monkeypatch) 
     )
 
     assert isinstance(result, orchestrator.GracefulDegradation)
-    assert result.registry_compatibility_kickbacks == 1
+    assert result.registryCompatibilityKickbacks == 1
     assert len(llm.prompts) == 2
     assert "registered template for 'can' expects a permission matrix" in llm.prompts[1]
     assert "A previous proposal was schema-valid but the registered harness" in llm.prompts[1]

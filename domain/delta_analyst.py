@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from domain.pack_registry import disabled_pack_error, enabled_arity_contracts
 from domain.ports import LLMClient
 from domain.schema import (
     ArgumentBinding,
@@ -17,20 +18,6 @@ from domain.schema import (
     PartialInteractionSpec,
     ScopedChangeSet,
 )
-
-
-_ARITY_CONTRACTS = """\
-rate-limiter: at least one knob whose binding.kind is \"driver\"; exactly one
-timeseries observable; no knob may have axisRole.
-state-machine: at least one enum knob (the event); exactly one nodeState
-observable; no knob may have axisRole.
-permission: at least two enum knobs; exactly one enum knob has axisRole \"x\"
-and exactly one enum knob has axisRole \"y\"; exactly one matrixCell observable.
-decision-tree: two to four knobs of any supported type; exactly one pathTrace
-observable; no knob may have axisRole.
-numeric-fn: at least one scalar knob with axisRole \"x\"; exactly one scalar
-observable.
-"""
 
 
 @dataclass(frozen=True)
@@ -142,8 +129,8 @@ Scoped head source:
 Full InteractionSpec JSON Schema:
 {json.dumps(InteractionSpec.model_json_schema(), sort_keys=True)}
 
-All five enabled domain-pack arity contracts:
-{_ARITY_CONTRACTS}{repair_instruction}{compatibility_instruction}
+Enabled domain-pack arity contracts (only these packs are selectable):
+{enabled_arity_contracts()}{repair_instruction}{compatibility_instruction}
 """
 
 
@@ -199,6 +186,9 @@ def _arity_contract_error(proposal: PartialInteractionSpec) -> str | None:
     knobs = proposal.knobs
     observables = proposal.observables
     pack = proposal.domainPack
+    availability_error = disabled_pack_error(pack)
+    if availability_error is not None:
+        return availability_error
 
     if pack is DomainPackId.RATE_LIMITER:
         if not any(knob.binding.kind == "driver" for knob in knobs):

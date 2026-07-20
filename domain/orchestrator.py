@@ -38,7 +38,7 @@ class DegradeResult:
     reason: str
     plain_explanation: str | None = None
     divergence_report: tuple[dict[str, Any], ...] = ()
-    registry_compatibility_kickbacks: int = 0
+    registryCompatibilityKickbacks: int = 0
     kind: str = field(init=False, default="degraded")
 
 
@@ -126,7 +126,7 @@ def run_pipeline(
     sandbox_id = sandbox.create_sandbox("base")
     try:
         loop_b_kickbacks = 0
-        template_compatibility_kickbacks = 0
+        registryCompatibilityKickbacks = 0
         compatibility_feedback: str | None = None
         while True:
             if compatibility_feedback is None:
@@ -163,11 +163,11 @@ def run_pipeline(
                             f"{scoped_change_set.entry_point.fn} yet."
                         ),
                         loop_a_attempts=loop_a_attempt,
-                        registry_compatibility_kickbacks=template_compatibility_kickbacks,
+                        registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                     )
                 except UnsupportedTemplateProposal as error:
-                    if template_compatibility_kickbacks < MAX_TEMPLATE_COMPATIBILITY_KICKBACKS:
-                        template_compatibility_kickbacks += 1
+                    if registryCompatibilityKickbacks < MAX_TEMPLATE_COMPATIBILITY_KICKBACKS:
+                        registryCompatibilityKickbacks += 1
                         compatibility_feedback = str(error)
                         # Registry feedback is a one-shot re-selection, like the
                         # Adversary kickback: it changes the proposed spec, never
@@ -196,7 +196,7 @@ def run_pipeline(
                                 f"the registered {scoped_change_set.entry_point.fn} workload shape",
                             ),
                             loop_a_attempts=loop_a_attempt,
-                            registry_compatibility_kickbacks=template_compatibility_kickbacks,
+                            registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                         )
                     partial_spec = fallback_spec
                 except (NotImplementedError, ValueError) as error:
@@ -210,7 +210,7 @@ def run_pipeline(
                             "the dependency boundary with a real service or a focused integration test",
                         ),
                         loop_a_attempts=loop_a_attempt,
-                        registry_compatibility_kickbacks=template_compatibility_kickbacks,
+                        registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                     )
                 emit_progress(
                     "building",
@@ -239,7 +239,7 @@ def run_pipeline(
                         ),
                         divergence_report=_divergence_report(fidelity),
                         loop_a_attempts=loop_a_attempt,
-                        registry_compatibility_kickbacks=template_compatibility_kickbacks,
+                        registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                     )
                 break
             else:
@@ -251,7 +251,7 @@ def run_pipeline(
                     ),
                     divergence_report=_divergence_report(fidelity),
                     loop_a_attempts=MAX_LOOP_A_ATTEMPTS,
-                    registry_compatibility_kickbacks=template_compatibility_kickbacks,
+                    registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                 )
 
             if compatibility_feedback is not None:
@@ -277,7 +277,7 @@ def run_pipeline(
                             partial_spec.thesis,
                             f"{scoped_change_set.entry_point.fn} at the boundary condition you care about",
                         ),
-                        registry_compatibility_kickbacks=template_compatibility_kickbacks,
+                        registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                     )
                 # LOOP B: re-enter Delta Analyst, then re-run downstream work with its new spec.
                 loop_b_kickbacks += 1
@@ -290,7 +290,7 @@ def run_pipeline(
                         partial_spec.thesis,
                         f"{scoped_change_set.entry_point.fn} with a representative production input",
                     ),
-                    registry_compatibility_kickbacks=template_compatibility_kickbacks,
+                    registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                 )
             interaction_spec = InteractionSpec(
                 specVersion="2.0",
@@ -311,7 +311,7 @@ def run_pipeline(
                     sandbox_id,
                     model,
                     reasoning_effort,
-                    template_compatibility_kickbacks,
+                    registryCompatibilityKickbacks,
                 ),
             )
             # Step 40: Synthesizer validates/mechanically materializes the complete spec.
@@ -378,7 +378,7 @@ def _provenance(
     sandbox_id: str,
     model: str,
     reasoning_effort: str,
-    registry_compatibility_kickbacks: int,
+    registryCompatibilityKickbacks: int,
 ) -> Provenance:
     """Populate Orchestrator-owned provenance facts before the completed spec returns."""
     return Provenance(
@@ -388,7 +388,7 @@ def _provenance(
         generatedAt=datetime.now(UTC).isoformat(),
         modelIds={"delta-analyst": f"{model}; reasoning={reasoning_effort}"},
         harnessSourceUri=f"sandbox://{sandbox_id}/lever-pipeline",
-        registryCompatibilityKickbacks=registry_compatibility_kickbacks,
+        registryCompatibilityKickbacks=registryCompatibilityKickbacks,
     )
 
 

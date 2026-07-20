@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 
 from domain.delta_analyst import analyze_delta
+from domain.pack_registry import PACK_REGISTRY
 from domain.ports import LLMClient
-from domain.schema import DependencyLedger, EntryPoint, ScopedChangeSet
+from domain.schema import DependencyLedger, DomainPackId, EntryPoint, ScopedChangeSet
 from infra.fakes.fake_llm import FakeLLMClient
 
 
@@ -50,7 +51,9 @@ def test_delta_analyst_accepts_valid_rate_limiter_response(
     assert len(fake.prompts) == 1
     assert "Full InteractionSpec JSON Schema" in fake.prompts[0]
     assert "Scoped base source" in fake.prompts[0]
-    assert "All five enabled domain-pack arity contracts" in fake.prompts[0]
+    assert "Enabled domain-pack arity contracts (only these packs are selectable)" in fake.prompts[0]
+    contracts = fake.prompts[0].split("Enabled domain-pack arity contracts", 1)[1]
+    assert "decision-tree:" not in contracts
 
 
 def test_delta_analyst_reprompts_once_with_arity_error_then_corrects(
@@ -92,3 +95,62 @@ def test_delta_analyst_exhausts_one_retry_then_uses_numeric_fallback(
         "you proposed 5 knobs, the maximum is 4 — "
         "select only the most behaviorally relevant."
     ) in fake.prompts[1]
+
+
+def test_disabled_decision_tree_proposal_is_rejected_then_falls_back_to_numeric_fn(
+    hero_scope: ScopedChangeSet, hero_sources: tuple[str, str]
+) -> None:
+    """C-6 makes an enum value for an unbuilt pack unselectable before templating."""
+    decision_tree = {
+        "thesis": "A branch changes which route is selected.",
+        "domainPack": "decision-tree",
+        "knobs": [
+            {
+                "id": "input",
+                "label": "input",
+                "binding": {
+                    "kind": "argument",
+                    "fn": "RateLimiter.admit",
+                    "argIndex": 0,
+                },
+                "type": "integer",
+                "domain": {"min": 0, "max": 1, "step": 1},
+                "default": 0,
+                "scale": "linear",
+                "unit": None,
+            },
+            {
+                "id": "enabled",
+                "label": "enabled",
+                "binding": {
+                    "kind": "argument",
+                    "fn": "RateLimiter.admit",
+                    "argIndex": 1,
+                },
+                "type": "boolean",
+                "domain": {"values": ["false", "true"]},
+                "default": False,
+                "scale": "linear",
+                "unit": None,
+            },
+        ],
+        "observables": [
+            {
+                "id": "path",
+                "label": "path",
+                "extractor": {"kind": "path", "instrumentation": "branch"},
+                "render": "pathTrace",
+                "compareMode": "overlay",
+                "unit": None,
+            }
+        ],
+    }
+    fake = FakeLLMClient([decision_tree, decision_tree])
+
+    result = analyze_delta(fake, hero_scope, *hero_sources)
+
+    assert PACK_REGISTRY[DomainPackId.DECISION_TREE].enabled is False
+    assert result.domainPack.value == "numeric-fn"
+    assert PACK_REGISTRY[result.domainPack].enabled is True
+    assert len(fake.prompts) == 2
+    assert "decision-tree is disabled and cannot be selected" in fake.prompts[1]
