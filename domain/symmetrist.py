@@ -4,7 +4,8 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from itertools import combinations
+from typing import Any, Mapping
 
 
 _DEFAULT_REPLICATE_SEED = "0"
@@ -26,6 +27,16 @@ class SymmetristResult:
     unjustified_keys: list[str] = field(default_factory=list)
     hash_a: str | None = None
     hash_b: str | None = None
+
+
+@dataclass(frozen=True)
+class FourWaySymmetristResult:
+    """All six pairwise symmetry checks required before a 2×2 can be trusted."""
+
+    passed: bool
+    comparisons: dict[str, SymmetristResult]
+    unjustified_keys: list[str] = field(default_factory=list)
+    harness_source_mismatches: list[str] = field(default_factory=list)
 
 
 def canonicalize(stub_config: dict, replicate_seed: str) -> dict:
@@ -70,6 +81,46 @@ def symmetrist_check(
         passed=True,
         hash_a=_hash_bytes(_canonical_json_bytes(canonical_a)),
         hash_b=_hash_bytes(_canonical_json_bytes(canonical_b)),
+    )
+
+
+def four_way_symmetrist_check(
+    harness_configs: Mapping[str, dict],
+    diff_new_deps: set[str] | None = None,
+    diff_removed_deps: set[str] | None = None,
+) -> FourWaySymmetristResult:
+    """Run Symmetrist over every pair of base, A, B, and actually executed AB.
+
+    Configuration symmetry is intentionally checked pairwise rather than by
+    assuming a common baseline: a non-identical shared stub is just as invalid
+    between A and AB as it is between base and A.
+    """
+    variants = ("base", "A", "B", "AB")
+    missing = sorted(set(variants) - set(harness_configs))
+    unexpected = sorted(set(harness_configs) - set(variants))
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append(f"missing variants: {', '.join(missing)}")
+        if unexpected:
+            details.append(f"unexpected variants: {', '.join(unexpected)}")
+        raise ValueError("four-way Symmetrist requires base, A, B, and AB; " + "; ".join(details))
+
+    comparisons: dict[str, SymmetristResult] = {}
+    offending: list[str] = []
+    new_deps = diff_new_deps or set()
+    removed_deps = diff_removed_deps or set()
+    for left, right in combinations(variants, 2):
+        result = symmetrist_check(
+            harness_configs[left], harness_configs[right], new_deps, removed_deps
+        )
+        label = f"{left}:{right}"
+        comparisons[label] = result
+        offending.extend(f"{label}:{key}" for key in result.unjustified_keys)
+    return FourWaySymmetristResult(
+        passed=not offending,
+        comparisons=comparisons,
+        unjustified_keys=sorted(offending),
     )
 
 

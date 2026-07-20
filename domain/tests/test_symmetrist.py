@@ -2,7 +2,7 @@
 
 import pytest
 
-from domain.symmetrist import symmetrist_check
+from domain.symmetrist import four_way_symmetrist_check, symmetrist_check
 
 
 @pytest.fixture
@@ -66,3 +66,23 @@ def test_symmetrist_rejects_different_shared_mock_latency(
 
     assert not result.passed
     assert result.unjustified_keys == ["db.latency_ms"]
+
+
+def test_four_way_symmetrist_reports_the_pair_and_key_that_broke_symmetry() -> None:
+    """Composition checks all six pairs rather than treating base as sufficient."""
+    result = four_way_symmetrist_check(
+        {
+            "base": {},
+            "A": {},
+            "B": {"latency_ms": 5},
+            "AB": {},
+        }
+    )
+
+    assert not result.passed
+    assert len(result.comparisons) == 6
+    assert result.unjustified_keys == [
+        "A:B:latency_ms",
+        "B:AB:latency_ms",
+        "base:B:latency_ms",
+    ]

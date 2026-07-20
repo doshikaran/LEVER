@@ -424,3 +424,34 @@ class PartialInteractionSpec(BaseModel):
     domainPack: DomainPackId
     knobs: list[Knob] = Field(min_length=1, max_length=4)
     observables: list[Observable] = Field(min_length=1, max_length=2)
+
+
+class ComposedCell(BaseModel):
+    """One empirically executed corner of a composed two-diff microworld."""
+
+    variant: Literal["base", "A", "B", "AB"]
+    observation: float
+
+
+class BehavioralMergeConflict(BaseModel):
+    """Measured deviation from the additive two-by-two factorial expectation."""
+
+    detected: bool
+    additiveExpectation: float
+    observedAB: float
+    deviation: float = Field(ge=0)
+    tolerance: float = Field(ge=0)
+    caption: str | None = None
+
+
+class ComposedWidgetConfig(BaseModel):
+    """Serializable 2×2 composition view; each cell is an executed harness result."""
+
+    changeAId: str
+    changeBId: str
+    observableId: str
+    observableLabel: str
+    unit: str | None
+    position: KnobPosition
+    cells: list[ComposedCell] = Field(min_length=4, max_length=4)
+    interaction: BehavioralMergeConflict

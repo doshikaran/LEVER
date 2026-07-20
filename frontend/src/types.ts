@@ -100,6 +100,28 @@ export type WidgetConfig = Readonly<{
   hypothesisCaveat: string | null
 }>
 
+/** Four executed corners of two related changes on the same subsystem. */
+export type ComposedWidgetConfig = Readonly<{
+  changeAId: string
+  changeBId: string
+  observableId: string
+  observableLabel: string
+  unit: string | null
+  position: KnobPosition
+  cells: readonly Readonly<{
+    variant: 'base' | 'A' | 'B' | 'AB'
+    observation: number
+  }>[]
+  interaction: Readonly<{
+    detected: boolean
+    additiveExpectation: number
+    observedAB: number
+    deviation: number
+    tolerance: number
+    caption: string | null
+  }>
+}>
+
 export type ProgressEvent = Readonly<{
   type: 'progress'
   stage: 'files_touched' | 'behavior_identified' | 'old_vs_new' | 'building'
