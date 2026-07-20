@@ -39,6 +39,7 @@ SOBOL_POINT_COUNT = 2**SOBOL_M
 ASSAYER_REPLICATES = 12
 CV_MAX = 0.25
 _NUMERIC_RENDERS = frozenset({"timeseries", "scalar", "histogram"})
+_CATEGORICAL_RENDERS = frozenset({"matrixCell", "nodeState", "pathTrace"})
 
 EvaluationRunner = Callable[[str, dict[str, Any], int | str], dict[str, Any]]
 
@@ -412,8 +413,12 @@ def _compare_observations(
                 else abs(harness_value - reference_value) / denominator
             )
             matches = relative_error <= tolerance.epsilon
-        else:
+        elif observable.render in _CATEGORICAL_RENDERS:
+            # C-4: a route/cell/state has no meaningful numeric distance. It
+            # agrees only when its complete categorical value is identical.
             matches = harness_value == reference_value
+        else:  # pragma: no cover - Observable.render is schema-constrained.
+            raise ValueError(f"Unsupported observable render type: {observable.render}")
         if not matches:
             mismatches.append(
                 DifferentialMismatch(
@@ -435,8 +440,12 @@ def _stability_estimate(observable: Observable, values: list[Any]) -> float:
         deviation = statistics.pstdev(numeric_values)
         # The schema does not yet carry a numeric unit scale; use one declared unit.
         return deviation / max(abs(mean), 1.0)
-    encoded = [json.dumps(value, sort_keys=True) for value in values]
-    return 1.0 - max(Counter(encoded).values()) / len(encoded)
+    if observable.render in _CATEGORICAL_RENDERS:
+        # C-4: categorical wobble is the fraction of replicates that differ
+        # from the modal route/cell/state, not a coefficient of variation.
+        encoded = [json.dumps(value, sort_keys=True) for value in values]
+        return 1.0 - max(Counter(encoded).values()) / len(encoded)
+    raise ValueError(f"Unsupported observable render type: {observable.render}")
 
 
 def _harness_command(harness_path: str, point: dict[str, Any], seed: int | str) -> str:
