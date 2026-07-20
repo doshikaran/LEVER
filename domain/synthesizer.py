@@ -28,12 +28,12 @@ class ControlDescriptor(BaseModel):
 
 
 class ChartDescriptor(BaseModel):
-    """A rate-limiter overlay chart with rendering-fidelity invariants embedded."""
+    """One observable view with its rendering-fidelity invariant embedded."""
 
     observableId: str
     label: str
-    render: Literal["timeseries"]
-    compareMode: Literal["overlay"]
+    render: Literal["timeseries", "matrixCell", "scalar"]
+    compareMode: Literal["overlay", "delta", "ratio"]
     unit: str | None
     yAxisZeroAnchored: Literal[True] = True
 
@@ -41,7 +41,7 @@ class ChartDescriptor(BaseModel):
 class WidgetConfig(BaseModel):
     """Plain serializable data the frontend needs to render a verified widget."""
 
-    domainPack: Literal["rate-limiter"]
+    domainPack: Literal["rate-limiter", "permission", "numeric-fn"]
     thesis: str
     controls: list[ControlDescriptor]
     charts: list[ChartDescriptor]
@@ -53,21 +53,23 @@ class WidgetConfig(BaseModel):
 
 
 def synthesize(spec: InteractionSpec) -> WidgetConfig:
-    """Mechanically generate the rate-limiter widget contract from a complete spec."""
-    if spec.domainPack is not DomainPackId.RATE_LIMITER:
+    """Mechanically generate a supported, verified frontend widget contract."""
+    supported_packs = {
+        DomainPackId.RATE_LIMITER,
+        DomainPackId.PERMISSION,
+        DomainPackId.NUMERIC_FN,
+    }
+    if spec.domainPack not in supported_packs:
         raise NotImplementedError(
-            f"Synthesizer currently implements the rate-limiter pack, not {spec.domainPack.value!r}"
+            f"Synthesizer does not implement {spec.domainPack.value!r} yet"
         )
     if len(spec.observables) != 1:
-        raise ValueError("rate-limiter requires exactly one observable")
+        raise ValueError(f"{spec.domainPack.value} requires exactly one observable")
     observable = spec.observables[0]
-    if observable.render != "timeseries" or observable.compareMode != "overlay":
-        raise ValueError("rate-limiter requires a timeseries observable in overlay mode")
-    if not any(knob.binding.kind == "driver" for knob in spec.knobs):
-        raise ValueError("rate-limiter requires at least one driver-bound knob")
+    _validate_supported_pack(spec, observable.render, observable.compareMode)
 
     return WidgetConfig(
-        domainPack="rate-limiter",
+        domainPack=spec.domainPack.value,
         thesis=spec.thesis,
         controls=[
             ControlDescriptor(
@@ -87,8 +89,8 @@ def synthesize(spec: InteractionSpec) -> WidgetConfig:
             ChartDescriptor(
                 observableId=observable.id,
                 label=observable.label,
-                render="timeseries",
-                compareMode="overlay",
+                render=observable.render,
+                compareMode=observable.compareMode,
                 unit=observable.unit,
             )
         ],
@@ -98,6 +100,26 @@ def synthesize(spec: InteractionSpec) -> WidgetConfig:
         fidelityBand=spec.fidelity.band,
         fidelityConfidence=spec.fidelity.confidence,
     )
+
+
+def _validate_supported_pack(
+    spec: InteractionSpec,
+    render: str,
+    compare_mode: str,
+) -> None:
+    """Keep the small set of executable fallback views faithful to their pack contracts."""
+    if spec.domainPack is DomainPackId.RATE_LIMITER:
+        if render != "timeseries" or compare_mode != "overlay":
+            raise ValueError("rate-limiter requires a timeseries observable in overlay mode")
+        if not any(knob.binding.kind == "driver" for knob in spec.knobs):
+            raise ValueError("rate-limiter requires at least one driver-bound knob")
+        return
+    if spec.domainPack is DomainPackId.PERMISSION:
+        if render != "matrixCell":
+            raise ValueError("permission requires a matrixCell observable")
+        return
+    if spec.domainPack is DomainPackId.NUMERIC_FN and render != "scalar":
+        raise ValueError("numeric-fn requires a scalar observable")
 
 
 __all__ = ["ChartDescriptor", "ControlDescriptor", "WidgetConfig", "synthesize"]

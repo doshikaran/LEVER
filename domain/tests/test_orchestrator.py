@@ -26,6 +26,7 @@ from infra.fakes.fake_sandbox import FakeSandboxRuntime
 
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "hero1"
 HERO2_FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "hero2"
+HERO3_FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "hero3"
 
 
 def _valid_response() -> dict:
@@ -90,6 +91,67 @@ def _live_hero2_numeric_fn_response() -> dict:
             }
         ],
     }
+
+
+def _incompatible_permission_response() -> dict:
+    """A valid permission-pack draft that a no-driver matrix template must reject."""
+    return {
+        "thesis": "The permission check changes for inherited groups.",
+        "domainPack": "permission",
+        "knobs": [
+            {
+                "id": "role",
+                "label": "role",
+                "binding": {"kind": "driver", "param": "role"},
+                "type": "enum",
+                "domain": {"values": ["viewer", "contractor"]},
+                "default": "contractor",
+                "scale": "linear",
+                "unit": None,
+                "axisRole": "x",
+            },
+            {
+                "id": "resource",
+                "label": "resource",
+                "binding": {"kind": "argument", "fn": "can", "argIndex": 2},
+                "type": "enum",
+                "domain": {"values": ["doc", "audit-log"]},
+                "default": "audit-log",
+                "scale": "linear",
+                "unit": None,
+                "axisRole": "y",
+            },
+        ],
+        "observables": [
+            {
+                "id": "allow",
+                "label": "allow",
+                "extractor": {"kind": "returnValue", "path": "$"},
+                "render": "matrixCell",
+                "compareMode": "delta",
+                "unit": None,
+            }
+        ],
+    }
+
+
+def _compatible_permission_response() -> dict:
+    """The corresponding role/resource/same_tenant matrix proposal after feedback."""
+    response = _incompatible_permission_response()
+    response["knobs"][0]["binding"] = {"kind": "argument", "fn": "can", "argIndex": 0}
+    response["knobs"].append(
+        {
+            "id": "same_tenant",
+            "label": "same tenant",
+            "binding": {"kind": "argument", "fn": "can", "argIndex": 3},
+            "type": "boolean",
+            "domain": {"values": ["false", "true"]},
+            "default": True,
+            "scale": "linear",
+            "unit": None,
+        }
+    )
+    return response
 
 
 def _fidelity(passed: bool) -> FidelityVerification:
@@ -198,6 +260,7 @@ def test_loop_a_reenters_harness_engineer_after_one_scripted_fidelity_failure(mo
     )
 
     assert result.domainPack.value == "rate-limiter"
+    assert result.provenance.registryCompatibilityKickbacks == 0
     assert len(harness_calls) == 2
     assert not fidelity_results
     assert [stage for stage, _ in progress] == [
@@ -241,6 +304,7 @@ def test_loop_b_kicks_back_to_delta_analyst_once_then_recovers(monkeypatch) -> N
     )
 
     assert result.domainPack.value == "rate-limiter"
+    assert result.provenance.registryCompatibilityKickbacks == 0
     assert len(harness_calls) == 2
     assert len(fake_llm.prompts) == 2
     assert not adversary_results
@@ -276,24 +340,60 @@ def test_unregistered_entry_point_returns_graceful_degradation_without_execution
     assert not runtime.run_calls
 
 
-def test_live_hero2_numeric_fn_proposal_degrades_before_harness_execution() -> None:
-    """A valid direct call is not falsely fed to Hero 2's retry-workload template."""
+def test_live_hero2_numeric_fn_proposal_kicks_back_then_degrades_without_execution() -> None:
+    """An unservable direct call gets one re-selection before an honest degradation."""
     runtime = FakeSandboxRuntime()
+    llm = FakeLLMClient([
+        _live_hero2_numeric_fn_response(),
+        _live_hero2_numeric_fn_response(),
+    ])
     result = orchestrator.run_pipeline(
         str(HERO2_FIXTURE_DIR / "base.py"),
         str(HERO2_FIXTURE_DIR / "head.py"),
         runtime,
-        FakeLLMClient([_live_hero2_numeric_fn_response()]),
+        llm,
         "fake-model",
         "low",
     )
 
     assert isinstance(result, orchestrator.GracefulDegradation)
-    assert result.reason == (
-        "registered template for 'next_delay' expects a concurrent-retry workload "
-        "(clients/failureRate/maxRetries); proposed spec is a direct single-argument "
-        "call, which this template does not support"
+    assert result.reason.startswith(
+        "Registered-template compatibility failed after one Delta Analyst kickback, "
+        "and the numeric-fn fallback is not executable for this entry point: "
     )
     assert result.loop_a_attempts == 1
+    assert result.registry_compatibility_kickbacks == 1
     assert runtime.created_templates == ["base"]
     assert not runtime.run_calls
+    assert len(llm.prompts) == 2
+    assert "registered template for 'next_delay' expects a concurrent-retry workload" in llm.prompts[1]
+
+
+def test_registry_incompatibility_kicks_back_to_delta_analyst_once(monkeypatch) -> None:
+    """A schema-valid but unservable proposal gets one reason-only reselection pass."""
+    class ScriptedVerifier:
+        def __init__(self, runtime):
+            pass
+
+        def verify(self, *args, **kwargs):
+            return _fidelity(False)
+
+    monkeypatch.setattr(orchestrator, "FidelityVerifier", ScriptedVerifier)
+    llm = FakeLLMClient([
+        _incompatible_permission_response(),
+        _compatible_permission_response(),
+    ])
+    result = orchestrator.run_pipeline(
+        str(HERO3_FIXTURE_DIR / "base.py"),
+        str(HERO3_FIXTURE_DIR / "head.py"),
+        FakeSandboxRuntime(),
+        llm,
+        "fake-model",
+        "low",
+    )
+
+    assert isinstance(result, orchestrator.GracefulDegradation)
+    assert result.registry_compatibility_kickbacks == 1
+    assert len(llm.prompts) == 2
+    assert "registered template for 'can' expects a permission matrix" in llm.prompts[1]
+    assert "A previous proposal was schema-valid but the registered harness" in llm.prompts[1]

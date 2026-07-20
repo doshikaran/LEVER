@@ -28,6 +28,7 @@ TOP_SEEDS = 8
 EXPLOIT_EVALUATIONS_PER_SEED = 8
 MAX_EVALUATIONS = EXPLORE_POINTS + TOP_SEEDS * EXPLOIT_EVALUATIONS_PER_SEED
 NO_DIVERGENCE_EPSILON = 0.02
+_NUMERIC_RENDERS = frozenset({"timeseries", "scalar", "histogram"})
 
 EvaluationRunner = Callable[[dict[str, Any]], "ObservationBundle"]
 BatchEvaluationRunner = Callable[[list[dict[str, Any]]], list["ObservationBundle"]]
@@ -482,20 +483,25 @@ def _divergences(
             key: _raw_distance(entry.observations)
             for key, entry in cache.items()
         }
-    ranges = {
-        observable.id: _observed_range(cache.values(), observable.id)
-        for observable in observables
-    }
     return {
         key: sum(
-            _observable_distance(entry.observations, observable.id) / ranges[observable.id]
-            if ranges[observable.id] > 0
-            else 0.0
+            _normalized_observable_distance(entry.observations, observable, cache.values())
             for observable in observables
         )
         / len(observables)
         for key, entry in cache.items()
     }
+
+
+def _normalized_observable_distance(
+    bundle: ObservationBundle, observable: Observable, entries: Any
+) -> float:
+    """Normalize numeric values only; categorical cell/route flips are unit distance."""
+    distance = _observable_distance(bundle, observable.id)
+    if observable.render not in _NUMERIC_RENDERS:
+        return distance
+    observed_range = _observed_range(entries, observable.id)
+    return distance / observed_range if observed_range > 0 else 0.0
 
 
 def _observed_range(entries: Any, observable_id: str) -> float:
@@ -513,7 +519,12 @@ def _observable_distance(bundle: ObservationBundle, observable_id: str) -> float
     """Return numeric absolute distance or categorical equality distance."""
     base = bundle.base[observable_id]
     head = bundle.head[observable_id]
-    if isinstance(base, (int, float)) and isinstance(head, (int, float)):
+    if (
+        isinstance(base, (int, float))
+        and not isinstance(base, bool)
+        and isinstance(head, (int, float))
+        and not isinstance(head, bool)
+    ):
         return abs(float(head) - float(base))
     return 0.0 if base == head else 1.0
 
@@ -566,6 +577,8 @@ def _caption(bundle: ObservationBundle, observables: list[Observable]) -> str:
     observable = observables[0]
     base = bundle.base[observable.id]
     head = bundle.head[observable.id]
+    if observable.render not in _NUMERIC_RENDERS:
+        return f"{observable.label}: base={base!r}, head={head!r}."
     if isinstance(base, (int, float)) and isinstance(head, (int, float)):
         if observable.id == "admitted":
             if base == 0:

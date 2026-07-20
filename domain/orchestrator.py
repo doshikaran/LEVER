@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from domain.adversary import Adversary, AdversaryResult
-from domain.delta_analyst import DeltaAnalyst
+from domain.delta_analyst import DeltaAnalyst, numeric_fn_fallback
+from domain.entry_point_registry import get_entry_point_template
 from domain.fidelity_verifier import FidelityVerification, FidelityVerifier
 from domain.harness_engineer import (
     HarnessEngineer,
@@ -25,6 +26,7 @@ from infra.parsing.tree_sitter_adapter import TreeSitterPythonParser
 
 MAX_LOOP_A_ATTEMPTS = 3
 MAX_LOOP_B_KICKBACKS = 1
+MAX_TEMPLATE_COMPATIBILITY_KICKBACKS = 1
 _SANDBOX_BASE_MODULE = "/tmp/lever-pipeline/base.py"
 _SANDBOX_HEAD_MODULE = "/tmp/lever-pipeline/head.py"
 
@@ -36,6 +38,7 @@ class DegradeResult:
     reason: str
     plain_explanation: str | None = None
     divergence_report: tuple[dict[str, Any], ...] = ()
+    registry_compatibility_kickbacks: int = 0
     kind: str = field(init=False, default="degraded")
 
 
@@ -123,10 +126,21 @@ def run_pipeline(
     sandbox_id = sandbox.create_sandbox("base")
     try:
         loop_b_kickbacks = 0
+        template_compatibility_kickbacks = 0
+        compatibility_feedback: str | None = None
         while True:
-            partial_spec = DeltaAnalyst(llm).analyze(
-                scoped_change_set, base_source, head_source
-            )
+            if compatibility_feedback is None:
+                partial_spec = DeltaAnalyst(llm).analyze(
+                    scoped_change_set, base_source, head_source
+                )
+            else:
+                partial_spec = DeltaAnalyst(llm).analyze(
+                    scoped_change_set,
+                    base_source,
+                    head_source,
+                    compatibility_feedback=compatibility_feedback,
+                )
+                compatibility_feedback = None
             emit_progress(
                 "old_vs_new",
                 f"Old vs. new: {partial_spec.thesis}",
@@ -149,16 +163,42 @@ def run_pipeline(
                             f"{scoped_change_set.entry_point.fn} yet."
                         ),
                         loop_a_attempts=loop_a_attempt,
+                        registry_compatibility_kickbacks=template_compatibility_kickbacks,
                     )
                 except UnsupportedTemplateProposal as error:
-                    return GracefulDegradation(
-                        str(error),
-                        plain_explanation=_plain_explanation(
-                            partial_spec.thesis,
-                            f"the registered {scoped_change_set.entry_point.fn} workload shape",
-                        ),
-                        loop_a_attempts=loop_a_attempt,
+                    if template_compatibility_kickbacks < MAX_TEMPLATE_COMPATIBILITY_KICKBACKS:
+                        template_compatibility_kickbacks += 1
+                        compatibility_feedback = str(error)
+                        # Registry feedback is a one-shot re-selection, like the
+                        # Adversary kickback: it changes the proposed spec, never
+                        # the verified source or registered template.
+                        break
+                    template = get_entry_point_template(scoped_change_set.entry_point.fn)
+                    fallback_spec = (
+                        template.numeric_fallback()
+                        if template is not None and template.numeric_fallback is not None
+                        else numeric_fn_fallback(scoped_change_set)
                     )
+                    try:
+                        harness_pair = HarnessEngineer().generate(
+                            scoped_change_set,
+                            fallback_spec,
+                            _SANDBOX_BASE_MODULE,
+                            _SANDBOX_HEAD_MODULE,
+                        )
+                    except (NoHarnessTemplateRegistered, UnsupportedTemplateProposal, ValueError) as fallback_error:
+                        return GracefulDegradation(
+                            "Registered-template compatibility failed after one "
+                            "Delta Analyst kickback, and the numeric-fn fallback "
+                            f"is not executable for this entry point: {fallback_error}",
+                            plain_explanation=_plain_explanation(
+                                partial_spec.thesis,
+                                f"the registered {scoped_change_set.entry_point.fn} workload shape",
+                            ),
+                            loop_a_attempts=loop_a_attempt,
+                            registry_compatibility_kickbacks=template_compatibility_kickbacks,
+                        )
+                    partial_spec = fallback_spec
                 except (NotImplementedError, ValueError) as error:
                     if loop_a_attempt < MAX_LOOP_A_ATTEMPTS:
                         continue
@@ -170,6 +210,7 @@ def run_pipeline(
                             "the dependency boundary with a real service or a focused integration test",
                         ),
                         loop_a_attempts=loop_a_attempt,
+                        registry_compatibility_kickbacks=template_compatibility_kickbacks,
                     )
                 emit_progress(
                     "building",
@@ -198,6 +239,7 @@ def run_pipeline(
                         ),
                         divergence_report=_divergence_report(fidelity),
                         loop_a_attempts=loop_a_attempt,
+                        registry_compatibility_kickbacks=template_compatibility_kickbacks,
                     )
                 break
             else:
@@ -209,7 +251,11 @@ def run_pipeline(
                     ),
                     divergence_report=_divergence_report(fidelity),
                     loop_a_attempts=MAX_LOOP_A_ATTEMPTS,
+                    registry_compatibility_kickbacks=template_compatibility_kickbacks,
                 )
+
+            if compatibility_feedback is not None:
+                continue
 
             assert fidelity is not None
             adversary_result = Adversary(sandbox).search(
@@ -231,6 +277,7 @@ def run_pipeline(
                             partial_spec.thesis,
                             f"{scoped_change_set.entry_point.fn} at the boundary condition you care about",
                         ),
+                        registry_compatibility_kickbacks=template_compatibility_kickbacks,
                     )
                 # LOOP B: re-enter Delta Analyst, then re-run downstream work with its new spec.
                 loop_b_kickbacks += 1
@@ -243,6 +290,7 @@ def run_pipeline(
                         partial_spec.thesis,
                         f"{scoped_change_set.entry_point.fn} with a representative production input",
                     ),
+                    registry_compatibility_kickbacks=template_compatibility_kickbacks,
                 )
             interaction_spec = InteractionSpec(
                 specVersion="2.0",
@@ -263,6 +311,7 @@ def run_pipeline(
                     sandbox_id,
                     model,
                     reasoning_effort,
+                    template_compatibility_kickbacks,
                 ),
             )
             # Step 40: Synthesizer validates/mechanically materializes the complete spec.
@@ -329,6 +378,7 @@ def _provenance(
     sandbox_id: str,
     model: str,
     reasoning_effort: str,
+    registry_compatibility_kickbacks: int,
 ) -> Provenance:
     """Populate Orchestrator-owned provenance facts before the completed spec returns."""
     return Provenance(
@@ -338,6 +388,7 @@ def _provenance(
         generatedAt=datetime.now(UTC).isoformat(),
         modelIds={"delta-analyst": f"{model}; reasoning={reasoning_effort}"},
         harnessSourceUri=f"sandbox://{sandbox_id}/lever-pipeline",
+        registryCompatibilityKickbacks=registry_compatibility_kickbacks,
     )
 
 

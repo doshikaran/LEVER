@@ -343,6 +343,7 @@ class Provenance(BaseModel):
     modelIds: dict[str, str]
     harnessSourceUri: str
     forced: bool | None = None
+    registryCompatibilityKickbacks: int = Field(default=0, ge=0, le=1)
 
 
 class InteractionSpec(BaseModel):

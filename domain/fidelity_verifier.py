@@ -277,13 +277,14 @@ class FidelityVerifier:
             for index, point in enumerate(all_points)
         }
         differential_cache: dict[str, dict[str, dict[str, Any]]] = {}
-        differential_complete: set[str] = set()
         replicate_cache: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
         assay_points: list[dict[str, Any]] = []
         assay_seed_table: list[list[str]] = []
+        assay_prepared = False
 
         def prepare_assay(agreeing_points: list[dict[str, Any]]) -> None:
             """Tell the transport runner which faithful points Assayer may replicate."""
+            nonlocal assay_prepared
             assay_points[:] = agreeing_points
             assay_seed_table[:] = [
                 [
@@ -294,6 +295,7 @@ class FidelityVerifier:
                 ]
                 for point in agreeing_points
             ]
+            assay_prepared = True
 
         def trace_for(point: dict[str, Any]) -> TraceAttribution | None:
             """Return this point's driver-collected paired trace after the suite has run."""
@@ -331,12 +333,11 @@ class FidelityVerifier:
                     }
                 )
 
-            # Differential testing calls this exact final kind before Assayer begins.
-            if kind.startswith("reference_"):
-                if kind == "reference_head":
-                    differential_complete.add(point_key)
-                return differential_cache[point_key][kind]
-            if point_key not in differential_complete:
+            # A categorical Sobol design can contain duplicate positions.  Phase
+            # selection must therefore be driven by Verifier's explicit
+            # ``prepare_assay`` boundary, never by whether a position happened
+            # to be seen earlier in the differential loop.
+            if not assay_prepared or kind.startswith("reference_"):
                 return differential_cache[point_key][kind]
 
             seed_text = str(seed)

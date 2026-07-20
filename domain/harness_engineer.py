@@ -156,7 +156,9 @@ def build_harness_pair(
     template = get_entry_point_template(entry_point.fn)
     if template is None:
         raise NoHarnessTemplateRegistered(entry_point.fn)
-    incompatibility = template.proposal_shape.incompatibility_reason(entry_point.fn, knobs)
+    incompatibility = template.proposal_shape.incompatibility_reason(
+        entry_point.fn, knobs, observables
+    )
     if incompatibility is not None:
         raise UnsupportedTemplateProposal(incompatibility)
     stubs = tuple(

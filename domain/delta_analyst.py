@@ -54,6 +54,7 @@ class DeltaAnalyst:
         scoped_change_set: ScopedChangeSet,
         source_base: str,
         source_head: str,
+        compatibility_feedback: str | None = None,
     ) -> PartialInteractionSpec:
         """Return a validated partial spec, retrying one invalid LLM proposal once."""
         if scoped_change_set.entry_point is None:
@@ -67,6 +68,7 @@ class DeltaAnalyst:
                     source_base,
                     source_head,
                     validation_error,
+                    compatibility_feedback,
                 ),
                 PartialInteractionSpec.model_json_schema(),
             )
@@ -84,9 +86,12 @@ def analyze_delta(
     scoped_change_set: ScopedChangeSet,
     source_base: str,
     source_head: str,
+    compatibility_feedback: str | None = None,
 ) -> PartialInteractionSpec:
     """Convenience entry point for drafting a partial Interaction Spec."""
-    return DeltaAnalyst(llm_client).analyze(scoped_change_set, source_base, source_head)
+    return DeltaAnalyst(llm_client).analyze(
+        scoped_change_set, source_base, source_head, compatibility_feedback
+    )
 
 
 def _build_prompt(
@@ -94,6 +99,7 @@ def _build_prompt(
     source_base: str,
     source_head: str,
     validation_error: str | None,
+    compatibility_feedback: str | None = None,
 ) -> str:
     """Build the complete constrained-decoding prompt from the required inputs."""
     repair_instruction = ""
@@ -101,6 +107,15 @@ def _build_prompt(
         repair_instruction = (
             "\nYour previous proposal failed validation: "
             f"{validation_error}\nReturn a corrected proposal that satisfies the contract.\n"
+        )
+    compatibility_instruction = ""
+    if compatibility_feedback is not None:
+        compatibility_instruction = (
+            "\nA previous proposal was schema-valid but the registered harness "
+            "could not consume it:\n"
+            f"{compatibility_feedback}\n"
+            "Return a different valid InteractionSpec proposal that does not repeat "
+            "that incompatibility.\n"
         )
 
     return f"""\
@@ -128,7 +143,7 @@ Full InteractionSpec JSON Schema:
 {json.dumps(InteractionSpec.model_json_schema(), sort_keys=True)}
 
 All five enabled domain-pack arity contracts:
-{_ARITY_CONTRACTS}{repair_instruction}
+{_ARITY_CONTRACTS}{repair_instruction}{compatibility_instruction}
 """
 
 
@@ -281,6 +296,11 @@ def _numeric_fn_fallback(scoped_change_set: ScopedChangeSet) -> PartialInteracti
             )
         ],
     )
+
+
+def numeric_fn_fallback(scoped_change_set: ScopedChangeSet) -> PartialInteractionSpec:
+    """Expose the schema-level numeric fallback to orchestrator recovery paths."""
+    return _numeric_fn_fallback(scoped_change_set)
 
 
 def _first_entry_parameter(signature: str) -> tuple[str, int]:
