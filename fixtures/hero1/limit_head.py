@@ -1,12 +1,5 @@
-"""Hero 1 composition diff B: raise the configured fixed-window limit.
-
-This is deliberately a small, independent change on the same rate-limiter
-subsystem as ``head.py``.  It doubles the supplied limit before admitting
-requests; it does not contain the per-tenant window change from diff A.
-"""
-
+"""Fixed-window rate limiter — the 'old' version."""
 import time
-
 
 class RateLimiter:
     def __init__(self, limit_per_sec: int):

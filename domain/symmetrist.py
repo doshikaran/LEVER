@@ -39,6 +39,22 @@ class FourWaySymmetristResult:
     harness_source_mismatches: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class DependencyChangeSet:
+    """The dependency keys one source diff may add or remove from its harness."""
+
+    new_keys: frozenset[str] = frozenset()
+    removed_keys: frozenset[str] = frozenset()
+
+
+def _combine_dependency_changes(*changes: DependencyChangeSet) -> DependencyChangeSet:
+    """Compose independent source diffs for the base-to-AB comparison."""
+    return DependencyChangeSet(
+        new_keys=frozenset().union(*(change.new_keys for change in changes)),
+        removed_keys=frozenset().union(*(change.removed_keys for change in changes)),
+    )
+
+
 def canonicalize(stub_config: dict, replicate_seed: str) -> dict:
     """Apply the exact deterministic canonicalization required by the spec."""
     base_seed = stub_config.get("seed")
@@ -86,8 +102,8 @@ def symmetrist_check(
 
 def four_way_symmetrist_check(
     harness_configs: Mapping[str, dict],
-    diff_new_deps: set[str] | None = None,
-    diff_removed_deps: set[str] | None = None,
+    diff_a: DependencyChangeSet | None = None,
+    diff_b: DependencyChangeSet | None = None,
 ) -> FourWaySymmetristResult:
     """Run Symmetrist over every pair of base, A, B, and actually executed AB.
 
@@ -106,13 +122,29 @@ def four_way_symmetrist_check(
             details.append(f"unexpected variants: {', '.join(unexpected)}")
         raise ValueError("four-way Symmetrist requires base, A, B, and AB; " + "; ".join(details))
 
+    # A ↔ B is meaningful: it verifies a transition that removes A's harness
+    # dependencies and applies B's. Its allowed key set is therefore their
+    # union. The four adjacent edges use only the one diff they apply.
+    a_changes = diff_a or DependencyChangeSet()
+    b_changes = diff_b or DependencyChangeSet()
+    combined_changes = _combine_dependency_changes(a_changes, b_changes)
+    pair_changes = {
+        ("base", "A"): a_changes,
+        ("base", "B"): b_changes,
+        ("base", "AB"): combined_changes,
+        ("A", "B"): combined_changes,
+        ("A", "AB"): b_changes,
+        ("B", "AB"): a_changes,
+    }
     comparisons: dict[str, SymmetristResult] = {}
     offending: list[str] = []
-    new_deps = diff_new_deps or set()
-    removed_deps = diff_removed_deps or set()
     for left, right in combinations(variants, 2):
+        changes = pair_changes[(left, right)]
         result = symmetrist_check(
-            harness_configs[left], harness_configs[right], new_deps, removed_deps
+            harness_configs[left],
+            harness_configs[right],
+            set(changes.new_keys),
+            set(changes.removed_keys),
         )
         label = f"{left}:{right}"
         comparisons[label] = result

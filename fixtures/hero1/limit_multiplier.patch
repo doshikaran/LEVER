@@ -1,0 +1,5 @@
+--- base.py
++++ limit_head.py
+@@ -6 +6 @@
+-        self.limit = limit_per_sec
++        self.limit = limit_per_sec * 2

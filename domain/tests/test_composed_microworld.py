@@ -1,13 +1,16 @@
 """Local proof that composed microworlds execute all four empirical corners."""
 
+import difflib
 from pathlib import Path
 
 from domain.composed_microworld import (
     CompositionCheckout,
+    apply_unified_patch,
     build_composed_harnesses,
     compose_widget_config,
     detect_interaction_effect,
     evaluate_composed_position,
+    unified_diff,
 )
 from domain.schema import (
     AstNodeRef,
@@ -71,6 +74,33 @@ def _hero1_composition_checkout() -> CompositionCheckout:
         b_module_path=str(FIXTURE_DIR / "limit_head.py"),
         ab_module_path=str(FIXTURE_DIR / "combined.py"),
     )
+
+
+def test_hero1_combined_is_the_actual_b_patch_applied_to_a() -> None:
+    """AB is byte-derived from A plus B's patch, rather than hand-approximated."""
+    base = (FIXTURE_DIR / "base.py").read_text(encoding="utf-8")
+    a = (FIXTURE_DIR / "head.py").read_text(encoding="utf-8")
+    b = (FIXTURE_DIR / "limit_head.py").read_text(encoding="utf-8")
+    combined = (FIXTURE_DIR / "combined.py").read_text(encoding="utf-8")
+
+    patch = unified_diff(base, b, fromfile="base.py", tofile="limit_head.py")
+    assert patch == (FIXTURE_DIR / "limit_multiplier.patch").read_text(encoding="utf-8")
+    assert apply_unified_patch(a, patch) == combined
+    assert list(
+        difflib.unified_diff(a.splitlines(keepends=True), combined.splitlines(keepends=True), n=3)
+    ) == [
+        "--- \n",
+        "+++ \n",
+        "@@ -7,7 +7,7 @@\n",
+        " \n",
+        " class RateLimiter:\n",
+        "     def __init__(self, limit_per_sec: int, burst: int = 0):\n",
+        "-        self.limit = limit_per_sec\n",
+        "+        self.limit = limit_per_sec * 2\n",
+        "         self.burst = burst\n",
+        "         self.windows = defaultdict(deque)\n",
+        "         self.burst_used = 0  # BUG: shared, should be per-tenant\n",
+    ]
 
 
 def test_hero1_composition_generates_and_executes_all_four_harnesses_locally() -> None:

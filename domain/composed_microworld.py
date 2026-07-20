@@ -8,6 +8,7 @@ real execution rather than an arithmetic guess.
 
 from __future__ import annotations
 
+import difflib
 import json
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
@@ -22,7 +23,11 @@ from domain.schema import (
     PartialInteractionSpec,
     ScopedChangeSet,
 )
-from domain.symmetrist import FourWaySymmetristResult, four_way_symmetrist_check
+from domain.symmetrist import (
+    DependencyChangeSet,
+    FourWaySymmetristResult,
+    four_way_symmetrist_check,
+)
 
 
 VARIANTS = ("base", "A", "B", "AB")
@@ -77,6 +82,9 @@ def build_composed_harnesses(
     scoped_change_set: ScopedChangeSet,
     partial_spec: PartialInteractionSpec,
     checkout: CompositionCheckout,
+    *,
+    diff_a_dependencies: DependencyChangeSet | None = None,
+    diff_b_dependencies: DependencyChangeSet | None = None,
 ) -> ComposedHarnessSet:
     """Generate base/A and B/AB with the unchanged registered harness machinery."""
     engineer = HarnessEngineer()
@@ -108,7 +116,11 @@ def build_composed_harnesses(
         "B": _stub_config(b_ab),
         "AB": _stub_config(b_ab),
     }
-    symmetry = four_way_symmetrist_check(configs)
+    symmetry = four_way_symmetrist_check(
+        configs,
+        diff_a=diff_a_dependencies,
+        diff_b=diff_b_dependencies,
+    )
     source_mismatches = _harness_source_mismatches(artifacts)
     if source_mismatches:
         symmetry = replace(
@@ -231,6 +243,77 @@ def compose_widget_config(
 def _stub_config(pair: HarnessPair) -> dict[str, Any]:
     """Reconstruct the exact serializable stub configuration embedded in a pair."""
     return {stub.dependency: stub.as_dict() for stub in pair.stub_config}
+
+
+def unified_diff(base_source: str, changed_source: str, *, fromfile: str, tofile: str) -> str:
+    """Generate a zero-context unified patch for one independent source diff."""
+    return "".join(
+        difflib.unified_diff(
+            base_source.splitlines(keepends=True),
+            changed_source.splitlines(keepends=True),
+            fromfile=fromfile,
+            tofile=tofile,
+            n=0,
+        )
+    )
+
+
+def apply_unified_patch(source: str, patch: str) -> str:
+    """Apply unified-diff hunks by asserted source text, never by inference.
+
+    Patch line numbers belong to the base checkout. Composition instead finds
+    every old hunk exactly once in A's independently evolved checkout; a
+    missing or ambiguous hunk is a merge failure, never a guessed AB source.
+    """
+    lines = source.splitlines(keepends=True)
+    hunks = _parse_unified_hunks(patch)
+    if not hunks:
+        raise ValueError("unified patch has no hunks")
+    for old_lines, new_lines in hunks:
+        matches = [
+            index
+            for index in range(len(lines) - len(old_lines) + 1)
+            if lines[index:index + len(old_lines)] == old_lines
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "unified patch hunk must match the composition source exactly once; "
+                f"found {len(matches)} matches"
+            )
+        index = matches[0]
+        lines[index:index + len(old_lines)] = new_lines
+    return "".join(lines)
+
+
+def _parse_unified_hunks(patch: str) -> list[tuple[list[str], list[str]]]:
+    """Read standard unified-diff body lines while preserving exact source bytes."""
+    parsed: list[tuple[list[str], list[str]]] = []
+    old_lines: list[str] | None = None
+    new_lines: list[str] | None = None
+    for line in patch.splitlines(keepends=True):
+        if line.startswith(("--- ", "+++ ")):
+            continue
+        if line.startswith("@@ "):
+            if old_lines is not None and new_lines is not None:
+                parsed.append((old_lines, new_lines))
+            old_lines, new_lines = [], []
+            continue
+        if old_lines is None or new_lines is None:
+            continue
+        if line.startswith("-"):
+            old_lines.append(line[1:])
+        elif line.startswith("+"):
+            new_lines.append(line[1:])
+        elif line.startswith(" "):
+            old_lines.append(line[1:])
+            new_lines.append(line[1:])
+        elif line.startswith("\\ No newline at end of file"):
+            continue
+        else:
+            raise ValueError("unsupported unified patch line")
+    if old_lines is not None and new_lines is not None:
+        parsed.append((old_lines, new_lines))
+    return parsed
 
 
 def _harness_source_mismatches(artifacts: Mapping[str, HarnessArtifact]) -> list[str]:
