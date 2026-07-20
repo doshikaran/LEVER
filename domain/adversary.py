@@ -3,7 +3,7 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from domain.fidelity_verifier import FidelityVerification, sobol_points
 from domain.harness_engineer import HarnessPair
@@ -11,6 +11,7 @@ from domain.line_attribution import trace_attribution
 from domain.ports import SandboxRuntime
 from domain.schema import (
     InteractionSpec,
+    DomainPackId,
     Knob,
     KnobPosition,
     NamedPosition,
@@ -29,6 +30,7 @@ EXPLOIT_EVALUATIONS_PER_SEED = 8
 MAX_EVALUATIONS = EXPLORE_POINTS + TOP_SEEDS * EXPLOIT_EVALUATIONS_PER_SEED
 NO_DIVERGENCE_EPSILON = 0.02
 _NUMERIC_RENDERS = frozenset({"timeseries", "scalar", "histogram"})
+SearchObjective = Literal["normalized_divergence", "max_path_divergence"]
 
 EvaluationRunner = Callable[[dict[str, Any]], "ObservationBundle"]
 BatchEvaluationRunner = Callable[[list[dict[str, Any]]], list["ObservationBundle"]]
@@ -130,6 +132,7 @@ class Adversary:
                 sandbox_id, harness_pair, base_source, head_source
             )
 
+        objective = _objective_for(partial_spec.domainPack)
         explore_points = sobol_points(partial_spec.knobs, m=EXPLORE_M)
         explore_keys = {_point_key(point) for point in explore_points}
         cache: dict[str, CacheEntry] = {}
@@ -160,7 +163,7 @@ class Adversary:
         exploit_collisions_with_explore = 0
         exploit_collisions_with_exploit = 0
 
-        divergences = _divergences(cache, partial_spec.observables)
+        divergences = _divergences(cache, partial_spec.observables, objective)
         ranked = sorted(
             explore_points,
             key=lambda point: divergences[_point_key(point)],
@@ -173,6 +176,7 @@ class Adversary:
                 ranked[:TOP_SEEDS],
                 partial_spec.knobs,
                 partial_spec.observables,
+                objective,
                 explore_keys,
                 batch_runner,
             )
@@ -187,6 +191,7 @@ class Adversary:
                     seed,
                     partial_spec.knobs,
                     partial_spec.observables,
+                    objective,
                     runner,
                     explore_keys,
                 )
@@ -207,7 +212,7 @@ class Adversary:
             ),
         )
 
-        divergences = _divergences(cache, partial_spec.observables)
+        divergences = _divergences(cache, partial_spec.observables, objective)
         trace = tuple(
             TracePoint(entry.position, divergences[key])
             for key, entry in cache.items()
@@ -257,6 +262,7 @@ class Adversary:
         seed: dict[str, Any],
         knobs: list[Knob],
         observables: list[Observable],
+        objective: SearchObjective,
         runner: EvaluationRunner,
         explore_keys: set[str],
     ) -> tuple[int, int, int, int]:
@@ -280,7 +286,7 @@ class Adversary:
             else:
                 executed_new += 1
             self._evaluate(cache, candidate, runner)
-            divergences = _divergences(cache, observables)
+            divergences = _divergences(cache, observables, objective)
             if divergences[_point_key(candidate)] > divergences[_point_key(current)]:
                 current = candidate
                 misses[knob.id] = 0
@@ -302,6 +308,7 @@ class Adversary:
         seeds: list[dict[str, Any]],
         knobs: list[Knob],
         observables: list[Observable],
+        objective: SearchObjective,
         explore_keys: set[str],
         evaluate_many: BatchEvaluationRunner,
     ) -> tuple[int, int, int, int]:
@@ -347,7 +354,7 @@ class Adversary:
                 for point, observations in zip(fresh_points, fresh_observations, strict=True):
                     self._store(cache, point, observations)
 
-            divergences = _divergences(cache, observables)
+            divergences = _divergences(cache, observables, objective)
             for state, candidate in candidates:
                 if divergences[_point_key(candidate)] > divergences[_point_key(state["current"])]:
                     state["current"] = candidate
@@ -399,10 +406,22 @@ class Adversary:
         """Stage both harnesses once and execute their A/B observations per search point."""
         base_harness_path = f"{harness_pair.harness_a.entry_module}.harness.py"
         head_harness_path = f"{harness_pair.harness_b.entry_module}.harness.py"
-        _write_source(self._runtime, sandbox_id, harness_pair.harness_a.entry_module, base_source)
-        _write_source(self._runtime, sandbox_id, harness_pair.harness_b.entry_module, head_source)
+        _write_source(
+            self._runtime,
+            sandbox_id,
+            harness_pair.harness_a.entry_module,
+            harness_pair.harness_a.instrumented_module_source or base_source,
+        )
+        _write_source(
+            self._runtime,
+            sandbox_id,
+            harness_pair.harness_b.entry_module,
+            harness_pair.harness_b.instrumented_module_source or head_source,
+        )
         _write_source(self._runtime, sandbox_id, base_harness_path, harness_pair.harness_a.source)
         _write_source(self._runtime, sandbox_id, head_harness_path, harness_pair.harness_b.source)
+        trace_base_source = harness_pair.harness_a.instrumented_module_source or base_source
+        trace_head_source = harness_pair.harness_b.instrumented_module_source or head_source
 
         def run(point: dict[str, Any]) -> ObservationBundle:
             code = f"""\
@@ -424,8 +443,8 @@ print(json.dumps({{"base": base, "head": head}}, sort_keys=True))
                 trace=trace_attribution(
                     payload["base"].get("trace"),
                     payload["head"].get("trace"),
-                    base_source,
-                    head_source,
+                    trace_base_source,
+                    trace_head_source,
                 ),
             )
 
@@ -460,8 +479,8 @@ print(json.dumps(output, sort_keys=True))
                     trace=trace_attribution(
                         item["base"].get("trace"),
                         item["head"].get("trace"),
-                        base_source,
-                        head_source,
+                        trace_base_source,
+                        trace_head_source,
                     ),
                 )
                 for item in payload
@@ -471,16 +490,41 @@ print(json.dumps(output, sort_keys=True))
         return run
 
 
+def _objective_for(domain_pack: DomainPackId) -> SearchObjective:
+    """Select the C-5 path-vector objective automatically from the selected pack."""
+    if domain_pack is DomainPackId.DECISION_TREE:
+        return "max_path_divergence"
+    return "normalized_divergence"
+
+
 def _divergences(
-    cache: dict[str, CacheEntry], observables: list[Observable]
+    cache: dict[str, CacheEntry],
+    observables: list[Observable],
+    objective: SearchObjective = "normalized_divergence",
 ) -> dict[str, float]:
-    """Compute D(x) as mean per-observable distance normalized by observed range."""
+    """Compute D(x), using C-5's max path Hamming distance for decision trees."""
     if not cache:
         return {}
     if not observables:
         # Coordinate ascent compares cached raw differences while preserving its caller's ranges.
         return {
             key: _raw_distance(entry.observations)
+            for key, entry in cache.items()
+        }
+    if objective == "max_path_divergence":
+        path_observables = [
+            observable for observable in observables if observable.render == "pathTrace"
+        ]
+        return {
+            key: max(
+                (
+                    _normalized_observable_distance(
+                        entry.observations, observable, cache.values()
+                    )
+                    for observable in path_observables
+                ),
+                default=0.0,
+            )
             for key, entry in cache.items()
         }
     return {
@@ -497,7 +541,7 @@ def _normalized_observable_distance(
     bundle: ObservationBundle, observable: Observable, entries: Any
 ) -> float:
     """Normalize numeric values only; categorical cell/route flips are unit distance."""
-    distance = _observable_distance(bundle, observable.id)
+    distance = _observable_distance(bundle, observable.id, observable.render)
     if observable.render not in _NUMERIC_RENDERS:
         return distance
     observed_range = _observed_range(entries, observable.id)
@@ -515,10 +559,14 @@ def _observed_range(entries: Any, observable_id: str) -> float:
     return max(values) - min(values) if values else 0.0
 
 
-def _observable_distance(bundle: ObservationBundle, observable_id: str) -> float:
-    """Return numeric absolute distance or categorical equality distance."""
+def _observable_distance(
+    bundle: ObservationBundle, observable_id: str, render: str | None = None
+) -> float:
+    """Return numeric distance, categorical equality, or normalized path Hamming distance."""
     base = bundle.base[observable_id]
     head = bundle.head[observable_id]
+    if render == "pathTrace":
+        return _normalized_hamming_distance(base, head)
     if (
         isinstance(base, (int, float))
         and not isinstance(base, bool)
@@ -527,6 +575,22 @@ def _observable_distance(bundle: ObservationBundle, observable_id: str) -> float
     ):
         return abs(float(head) - float(base))
     return 0.0 if base == head else 1.0
+
+
+def _normalized_hamming_distance(base: Any, head: Any) -> float:
+    """Compare ordered source-tagged branch vectors, including path-length forks."""
+    if not isinstance(base, list) or not isinstance(head, list):
+        return 0.0 if base == head else 1.0
+    width = max(len(base), len(head))
+    if width == 0:
+        return 0.0
+    mismatches = sum(
+        1
+        for index in range(width)
+        if (base[index] if index < len(base) else None)
+        != (head[index] if index < len(head) else None)
+    )
+    return mismatches / width
 
 
 def _raw_distance(bundle: ObservationBundle) -> float:

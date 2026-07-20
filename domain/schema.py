@@ -200,6 +200,13 @@ class KnobPosition(RootModel[dict[str, KnobValue]]):
     """A mapping from stable knob IDs to their scalar, enum, or boolean values."""
 
 
+class BranchDecision(BaseModel):
+    """One empirically observed conditional outcome, tagged at its source location."""
+
+    tag: str
+    outcome: bool
+
+
 class VersionExecutionTrace(BaseModel):
     """Source lines empirically executed by one target module for one knob position."""
 
@@ -207,6 +214,7 @@ class VersionExecutionTrace(BaseModel):
     executedLines: list[int]
     entryLines: list[int]
     lineHits: dict[int, int] = Field(default_factory=dict)
+    branchDecisions: list[BranchDecision] = Field(default_factory=list)
 
 
 class ResponsibleLine(BaseModel):
@@ -343,7 +351,15 @@ class Provenance(BaseModel):
     modelIds: dict[str, str]
     harnessSourceUri: str
     forced: bool | None = None
-    registryCompatibilityKickbacks: int = Field(default=0, ge=0, le=1)
+    registryCompatibilityKickbacks: int = Field(
+        default=0,
+        ge=0,
+        le=1,
+        description=(
+            "The one pipeline-wide Delta Analyst re-selection used for either a "
+            "registered-template incompatibility or unavailable reference instrumentation."
+        ),
+    )
 
 
 class InteractionSpec(BaseModel):

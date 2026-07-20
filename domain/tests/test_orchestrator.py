@@ -396,4 +396,4 @@ def test_registry_incompatibility_kicks_back_to_delta_analyst_once(monkeypatch) 
     assert result.registryCompatibilityKickbacks == 1
     assert len(llm.prompts) == 2
     assert "registered template for 'can' expects a permission matrix" in llm.prompts[1]
-    assert "A previous proposal was schema-valid but the registered harness" in llm.prompts[1]
+    assert "A previous proposal was schema-valid but Lever could not execute it" in llm.prompts[1]

@@ -21,6 +21,13 @@ export type VersionExecutionTrace = Readonly<{
   executedLines: readonly number[]
   entryLines: readonly number[]
   lineHits?: Readonly<Record<string, number>>
+  /** Full ordered branch outcomes when the decision-tree pack instruments a run. */
+  branchDecisions?: readonly BranchDecision[]
+}>
+
+export type BranchDecision = Readonly<{
+  tag: string
+  outcome: boolean
 }>
 
 export type ResponsibleLine = Readonly<{

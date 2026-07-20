@@ -259,10 +259,22 @@ class FidelityVerifier:
         """Stage artifacts once, then execute generated and independent paths in one sandbox."""
         base_harness_path = f"{harness_pair.harness_a.entry_module}.harness.py"
         head_harness_path = f"{harness_pair.harness_b.entry_module}.harness.py"
-        _write_source(self._runtime, sandbox_id, harness_pair.harness_a.entry_module, base_source)
-        _write_source(self._runtime, sandbox_id, harness_pair.harness_b.entry_module, head_source)
+        _write_source(
+            self._runtime,
+            sandbox_id,
+            harness_pair.harness_a.entry_module,
+            harness_pair.harness_a.instrumented_module_source or base_source,
+        )
+        _write_source(
+            self._runtime,
+            sandbox_id,
+            harness_pair.harness_b.entry_module,
+            harness_pair.harness_b.instrumented_module_source or head_source,
+        )
         _write_source(self._runtime, sandbox_id, base_harness_path, harness_pair.harness_a.source)
         _write_source(self._runtime, sandbox_id, head_harness_path, harness_pair.harness_b.source)
+        trace_base_source = harness_pair.harness_a.instrumented_module_source or base_source
+        trace_head_source = harness_pair.harness_b.instrumented_module_source or head_source
 
         paths = {
             "harness_base": base_harness_path,
@@ -306,8 +318,8 @@ class FidelityVerifier:
             return trace_attribution(
                 item.get("trace_base"),
                 item.get("trace_head"),
-                base_source,
-                head_source,
+                trace_base_source,
+                trace_head_source,
             )
 
         def run(kind: str, point: dict[str, Any], seed: int | str) -> dict[str, Any]:
@@ -417,6 +429,7 @@ def _compare_observations(
         elif observable.render in _CATEGORICAL_RENDERS:
             # C-4: a route/cell/state has no meaningful numeric distance. It
             # agrees only when its complete categorical value is identical.
+            assert isinstance(tolerance, ExactTolerance)
             matches = harness_value == reference_value
         else:  # pragma: no cover - Observable.render is schema-constrained.
             raise ValueError(f"Unsupported observable render type: {observable.render}")
@@ -490,7 +503,7 @@ def _reference_program(
         raise ValueError(
             f"no harness template registered for this entry-point shape: {entry_point.fn}"
         )
-    return template.reference_program(
+    program = template.reference_program(
         ReferenceProgramRequest(
             module_path=module_path,
             knobs=knobs,
@@ -499,6 +512,40 @@ def _reference_program(
             seed=seed,
         )
     )
+    return _with_reference_branch_trace(program, observables)
+
+
+def _with_reference_branch_trace(program: str, observables: list[Observable]) -> str:
+    """Collect C-5 events through the same sys.settrace primitive as the harness."""
+    branch_observable_ids = [
+        observable.id for observable in observables if observable.render == "pathTrace"
+    ]
+    if not branch_observable_ids:
+        return program
+    return f'''\
+import sys
+
+_lever_branch_decisions = []
+
+def _lever_trace(frame, event, _arg):
+    if event == "line" and frame.f_code.co_name == "__lever_branch__":
+        tag = frame.f_locals.get("tag")
+        outcome = frame.f_locals.get("outcome")
+        if isinstance(tag, str) and isinstance(outcome, bool):
+            _lever_branch_decisions.append({{"tag": tag, "outcome": outcome}})
+    return _lever_trace
+
+_lever_previous_trace = sys.gettrace()
+_lever_namespace = {{}}
+sys.settrace(_lever_trace)
+try:
+    exec({program!r}, _lever_namespace)
+finally:
+    sys.settrace(_lever_previous_trace)
+OBSERVATIONS = _lever_namespace["OBSERVATIONS"]
+for _lever_observable_id in {branch_observable_ids!r}:
+    OBSERVATIONS[_lever_observable_id] = _lever_branch_decisions
+'''
 
 
 def _differential_bundle_command(

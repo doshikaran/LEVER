@@ -1,11 +1,20 @@
 """Deterministic harness planning and templating for isolated real-code execution."""
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from domain.entry_point_registry import HarnessBodyRequest, get_entry_point_template
+from domain.line_attribution import UninstrumentableReferenceError, instrument_branch_source
 from domain.ports import SandboxRuntime
-from domain.schema import DepEntry, Knob, Observable, PartialInteractionSpec, ScopedChangeSet
+from domain.schema import (
+    DepEntry,
+    DomainPackId,
+    Knob,
+    Observable,
+    PartialInteractionSpec,
+    ScopedChangeSet,
+)
 
 
 _MINIMAL_STUB_KINDS = frozenset({"network", "db", "native"})
@@ -68,6 +77,7 @@ class HarnessArtifact:
 
     source: str
     entry_module: str
+    instrumented_module_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +127,8 @@ class HarnessEngineer:
         partial_spec: PartialInteractionSpec,
         base_module_path: str,
         head_module_path: str,
+        base_source: str | None = None,
+        head_source: str | None = None,
     ) -> HarnessPair:
         """Generate the base/head pair from one template with import path as its sole delta."""
         return build_harness_pair(
@@ -125,6 +137,9 @@ class HarnessEngineer:
             partial_spec.observables,
             base_module_path,
             head_module_path,
+            domain_pack=partial_spec.domainPack,
+            base_source=base_source,
+            head_source=head_source,
         )
 
 
@@ -134,6 +149,9 @@ def build_harness_pair(
     observables: list[Observable],
     base_module_path: str,
     head_module_path: str,
+    domain_pack: DomainPackId | None = None,
+    base_source: str | None = None,
+    head_source: str | None = None,
 ) -> HarnessPair:
     """Build a symmetric pair from the entry point's registered source template."""
     entry_point = scoped_change_set.entry_point
@@ -186,14 +204,99 @@ def build_harness_pair(
     harness_b_source = template.harness_body(
         HarnessBodyRequest(module_path=head_module_path, **shared_request)
     )
+    base_instrumented_source = None
+    head_instrumented_source = None
+    if domain_pack is DomainPackId.DECISION_TREE:
+        # C-5: these are checked-out module transforms, not harness-only hooks.
+        # Fidelity stages the same transformed text for both the harness import
+        # and its independent reference-program import.
+        base_instrumented_source = _instrumented_module_source(
+            base_module_path, base_source
+        )
+        head_instrumented_source = _instrumented_module_source(
+            head_module_path, head_source
+        )
+        harness_a_source = _with_branch_trace_adapter(harness_a_source)
+        harness_b_source = _with_branch_trace_adapter(harness_b_source)
     _assert_module_path_is_only_difference(harness_a_source, harness_b_source)
     return HarnessPair(
-        harness_a=HarnessArtifact(harness_a_source, base_module_path),
-        harness_b=HarnessArtifact(harness_b_source, head_module_path),
+        harness_a=HarnessArtifact(
+            harness_a_source, base_module_path, base_instrumented_source
+        ),
+        harness_b=HarnessArtifact(
+            harness_b_source, head_module_path, head_instrumented_source
+        ),
         stub_config=stubs,
         uncertainty_specs=stubs,
         workload_driver=driver,
     )
+
+
+def _instrumented_module_source(module_path: str, source: str | None) -> str:
+    """Return source-transform output or a typed C-5 re-selection signal."""
+    if source is None:
+        try:
+            source = Path(module_path).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            raise UninstrumentableReferenceError(
+                f"reference path {module_path!r} cannot be read as Python source and "
+                "cannot be branch-instrumented"
+            ) from error
+    return instrument_branch_source(source, module_path)
+
+
+def _with_branch_trace_adapter(source: str) -> str:
+    """Expose the transformed module's branch vector through the existing harness trace."""
+    adapter = """\
+
+# C-5 adapter: expose the existing sys.settrace collector as the observable.
+_lever_original_run = run
+
+def run(config=None, seed=0):
+    result = _lever_original_run(config, seed)
+    branch_vector = list(result.get("trace", {}).get("branch_decisions", ()))
+    for observable in OBSERVABLES:
+        if observable["render"] == "pathTrace":
+            result["observations"][observable["id"]] = branch_vector
+    return result
+"""
+    line_hits = "    line_hits = {}\n"
+    trace_hook = """\
+
+    branch_decisions = []
+"""
+    if line_hits not in source:
+        raise UninstrumentableReferenceError(
+            "generated harness does not expose the shared sys.settrace line collector"
+        )
+    source = source.replace(line_hits, line_hits + trace_hook, 1)
+    trace_definition = "    def trace_lines(frame, event, _arg):\n"
+    branch_capture = """\
+        if event == "line" and frame.f_code.co_name == "__lever_branch__":
+            tag = frame.f_locals.get("tag")
+            outcome = frame.f_locals.get("outcome")
+            if isinstance(tag, str) and isinstance(outcome, bool):
+                branch_decisions.append({"tag": tag, "outcome": outcome})
+"""
+    if trace_definition not in source:
+        raise UninstrumentableReferenceError(
+            "generated harness does not expose the shared sys.settrace callback"
+        )
+    source = source.replace(trace_definition, trace_definition + branch_capture, 1)
+    line_hit_field = '"line_hits": {str(line): line_hits[line] for line in sorted(line_hits)},'
+    if line_hit_field not in source:
+        raise UninstrumentableReferenceError(
+            "generated harness does not expose a serializable execution trace"
+        )
+    source = source.replace(
+        line_hit_field,
+        line_hit_field + '\n            "branch_decisions": branch_decisions,',
+        1,
+    )
+    main_guard = '\n\nif __name__ == "__main__":'
+    if main_guard in source:
+        return source.replace(main_guard, adapter + main_guard, 1)
+    return source + adapter
 
 
 def retry_plan(

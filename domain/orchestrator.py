@@ -16,6 +16,7 @@ from domain.harness_engineer import (
     NoHarnessTemplateRegistered,
     UnsupportedTemplateProposal,
 )
+from domain.line_attribution import UninstrumentableReferenceError
 from domain.ports import LLMClient, SandboxRuntime
 from domain.schema import InteractionSpec, Provenance
 from domain.scout import scout
@@ -26,7 +27,7 @@ from infra.parsing.tree_sitter_adapter import TreeSitterPythonParser
 
 MAX_LOOP_A_ATTEMPTS = 3
 MAX_LOOP_B_KICKBACKS = 1
-MAX_TEMPLATE_COMPATIBILITY_KICKBACKS = 1
+MAX_PROPOSAL_RESELECTION_KICKBACKS = 1
 _SANDBOX_BASE_MODULE = "/tmp/lever-pipeline/base.py"
 _SANDBOX_HEAD_MODULE = "/tmp/lever-pipeline/head.py"
 
@@ -126,6 +127,9 @@ def run_pipeline(
     sandbox_id = sandbox.create_sandbox("base")
     try:
         loop_b_kickbacks = 0
+        # Registry incompatibility and unavailable decision-tree instrumentation
+        # are both failures of the same Delta proposal.  Part 5 permits one
+        # re-selection total, not one fresh prompt per failure subtype.
         registryCompatibilityKickbacks = 0
         compatibility_feedback: str | None = None
         while True:
@@ -154,6 +158,23 @@ def run_pipeline(
                         partial_spec,
                         _SANDBOX_BASE_MODULE,
                         _SANDBOX_HEAD_MODULE,
+                        base_source,
+                        head_source,
+                    )
+                except UninstrumentableReferenceError as error:
+                    if registryCompatibilityKickbacks < MAX_PROPOSAL_RESELECTION_KICKBACKS:
+                        registryCompatibilityKickbacks += 1
+                        compatibility_feedback = str(error)
+                        break
+                    return GracefulDegradation(
+                        "The reference path could not be branch-instrumented after "
+                        "one Delta Analyst re-selection: " + str(error),
+                        plain_explanation=_plain_explanation(
+                            partial_spec.thesis,
+                            "an instrumentable source-level reference implementation",
+                        ),
+                        loop_a_attempts=loop_a_attempt,
+                        registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                     )
                 except NoHarnessTemplateRegistered:
                     return GracefulDegradation(
@@ -166,7 +187,7 @@ def run_pipeline(
                         registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                     )
                 except UnsupportedTemplateProposal as error:
-                    if registryCompatibilityKickbacks < MAX_TEMPLATE_COMPATIBILITY_KICKBACKS:
+                    if registryCompatibilityKickbacks < MAX_PROPOSAL_RESELECTION_KICKBACKS:
                         registryCompatibilityKickbacks += 1
                         compatibility_feedback = str(error)
                         # Registry feedback is a one-shot re-selection, like the
@@ -185,6 +206,8 @@ def run_pipeline(
                             fallback_spec,
                             _SANDBOX_BASE_MODULE,
                             _SANDBOX_HEAD_MODULE,
+                            base_source,
+                            head_source,
                         )
                     except (NoHarnessTemplateRegistered, UnsupportedTemplateProposal, ValueError) as fallback_error:
                         return GracefulDegradation(

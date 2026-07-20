@@ -232,8 +232,20 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
             "base": {"admitted": 1},
             "head": {"admitted": 2},
             "trace": {
-                "base": {"file": str(base), "executedLines": [1], "entryLines": [1], "lineHits": {}},
-                "head": {"file": str(head), "executedLines": [1], "entryLines": [1], "lineHits": {}},
+                    "base": {
+                        "file": str(base),
+                        "executedLines": [1],
+                        "entryLines": [1],
+                        "lineHits": {},
+                        "branchDecisions": [],
+                    },
+                    "head": {
+                        "file": str(head),
+                        "executedLines": [1],
+                        "entryLines": [1],
+                        "lineHits": {},
+                        "branchDecisions": [],
+                    },
                 "responsibleLine": {
                     "version": "head",
                     "file": str(head),

@@ -98,8 +98,8 @@ def _build_prompt(
     compatibility_instruction = ""
     if compatibility_feedback is not None:
         compatibility_instruction = (
-            "\nA previous proposal was schema-valid but the registered harness "
-            "could not consume it:\n"
+            "\nA previous proposal was schema-valid but Lever could not execute it "
+            "through its verified pipeline:\n"
             f"{compatibility_feedback}\n"
             "Return a different valid InteractionSpec proposal that does not repeat "
             "that incompatibility.\n"

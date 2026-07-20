@@ -4,7 +4,127 @@ import ast
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from domain.schema import ResponsibleLine, TraceAttribution, VersionExecutionTrace
+from domain.schema import (
+    BranchDecision,
+    ResponsibleLine,
+    TraceAttribution,
+    VersionExecutionTrace,
+)
+
+
+class UninstrumentableReferenceError(ValueError):
+    """Raised when a reference module cannot receive C-5's Python source transform."""
+
+
+_BRANCH_TRACE_PREAMBLE = """\
+def __lever_branch__(tag, value):
+    outcome = bool(value)
+    return outcome
+
+def __lever_branch_iter__(tag, iterable):
+    for item in iterable:
+        __lever_branch__(tag, True)
+        yield item
+    __lever_branch__(tag, False)
+
+async def __lever_branch_async_iter__(tag, iterable):
+    async for item in iterable:
+        __lever_branch__(tag, True)
+        yield item
+    __lever_branch__(tag, False)
+"""
+
+
+class _BranchInstrumenter(ast.NodeTransformer):
+    """Wrap Python conditional predicates with deterministic source-location events."""
+
+    @staticmethod
+    def _tag(node: ast.AST) -> ast.Constant:
+        return ast.Constant(f"{node.lineno}:{node.col_offset}")
+
+    def visit_If(self, node: ast.If) -> ast.If:
+        self.generic_visit(node)
+        node.test = ast.copy_location(
+            ast.Call(
+                func=ast.Name(id="__lever_branch__", ctx=ast.Load()),
+                args=[self._tag(node), node.test],
+                keywords=[],
+            ),
+            node.test,
+        )
+        return node
+
+    def visit_While(self, node: ast.While) -> ast.While:
+        self.generic_visit(node)
+        node.test = ast.copy_location(
+            ast.Call(
+                func=ast.Name(id="__lever_branch__", ctx=ast.Load()),
+                args=[self._tag(node), node.test],
+                keywords=[],
+            ),
+            node.test,
+        )
+        return node
+
+    def visit_For(self, node: ast.For) -> ast.For:
+        self.generic_visit(node)
+        node.iter = ast.copy_location(
+            ast.Call(
+                func=ast.Name(id="__lever_branch_iter__", ctx=ast.Load()),
+                args=[self._tag(node), node.iter],
+                keywords=[],
+            ),
+            node.iter,
+        )
+        return node
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> ast.AsyncFor:
+        self.generic_visit(node)
+        node.iter = ast.copy_location(
+            ast.Call(
+                func=ast.Name(id="__lever_branch_async_iter__", ctx=ast.Load()),
+                args=[self._tag(node), node.iter],
+                keywords=[],
+            ),
+            node.iter,
+        )
+        return node
+
+
+def instrument_branch_source(source: str, source_name: str) -> str:
+    """Apply C-5's identical conditional-event transform to an instrumentable Python module."""
+    if not source_name.endswith(".py"):
+        raise UninstrumentableReferenceError(
+            f"reference path {source_name!r} is not Python source and cannot be branch-instrumented"
+        )
+    try:
+        tree = ast.parse(source, filename=source_name)
+    except SyntaxError as error:
+        raise UninstrumentableReferenceError(
+            f"reference path {source_name!r} is not parseable Python source and cannot be branch-instrumented"
+        ) from error
+
+    transformed = _BranchInstrumenter().visit(tree)
+    preamble = ast.parse(_BRANCH_TRACE_PREAMBLE).body
+    insertion_index = _preamble_insertion_index(transformed.body)
+    transformed.body[insertion_index:insertion_index] = preamble
+    ast.fix_missing_locations(transformed)
+    return ast.unparse(transformed) + "\n"
+
+
+def _preamble_insertion_index(body: list[ast.stmt]) -> int:
+    """Keep a docstring and mandatory future imports ahead of injected trace helpers."""
+    index = 0
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        if isinstance(body[0].value.value, str):
+            index = 1
+    while (
+        index < len(body)
+        and isinstance(body[index], ast.ImportFrom)
+        and body[index].module == "__future__"
+    ):
+        index += 1
+    return index
 
 
 def trace_attribution(
@@ -51,6 +171,7 @@ def _version_trace(raw: dict[str, Any]) -> VersionExecutionTrace:
     executed_lines = raw.get("executed_lines")
     entry_lines = raw.get("entry_lines")
     line_hits = raw.get("line_hits", {})
+    raw_branch_decisions = raw.get("branch_decisions", [])
     if not isinstance(file, str) or not isinstance(executed_lines, list) or not isinstance(entry_lines, list):
         raise ValueError("Generated execution trace must contain file, executed_lines, and entry_lines.")
     if not all(isinstance(line, int) and line >= 1 for line in (*executed_lines, *entry_lines)):
@@ -59,6 +180,8 @@ def _version_trace(raw: dict[str, Any]) -> VersionExecutionTrace:
         raise ValueError("Generated entry_lines must be a subset of actually executed lines.")
     if not isinstance(line_hits, dict):
         raise ValueError("Generated execution trace line_hits must be a mapping.")
+    if not isinstance(raw_branch_decisions, list):
+        raise ValueError("Generated execution trace branch_decisions must be a list.")
     normalized_hits: dict[int, int] = {}
     for raw_line, count in line_hits.items():
         try:
@@ -70,11 +193,25 @@ def _version_trace(raw: dict[str, Any]) -> VersionExecutionTrace:
         normalized_hits[line] = count
     if not set(normalized_hits).issubset(executed_lines):
         raise ValueError("Generated line_hits must be a subset of actually executed lines.")
+    branch_decisions: list[BranchDecision] = []
+    for decision in raw_branch_decisions:
+        if (
+            not isinstance(decision, dict)
+            or not isinstance(decision.get("tag"), str)
+            or not isinstance(decision.get("outcome"), bool)
+        ):
+            raise ValueError(
+                "Generated execution trace branch_decisions must contain tag/outcome pairs."
+            )
+        branch_decisions.append(
+            BranchDecision(tag=decision["tag"], outcome=decision["outcome"])
+        )
     return VersionExecutionTrace(
         file=file,
         executedLines=sorted(set(executed_lines)),
         entryLines=sorted(set(entry_lines)),
         lineHits=normalized_hits,
+        branchDecisions=branch_decisions,
     )
 
 
