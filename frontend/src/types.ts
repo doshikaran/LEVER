@@ -102,6 +102,18 @@ export type ProgressEvent = Readonly<{
   message: string
 }>
 
+/** One actual Adversary probe delivered before the terminal widget payload. */
+export type SearchTracePoint = Readonly<{
+  position: KnobPosition
+  divergence: number
+  phase: 'explore' | 'exploit'
+}>
+
+export type SearchTraceEvent = Readonly<{
+  type: 'search_trace'
+  tracePoint: SearchTracePoint
+}>
+
 export type CompleteEvent = Readonly<{
   type: 'complete'
   changeId: string

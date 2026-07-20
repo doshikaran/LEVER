@@ -34,6 +34,26 @@ def _rate_limiter_response() -> dict:
         "domainPack": "rate-limiter",
         "knobs": [
             {
+                "id": "limit_per_sec",
+                "label": "per-tenant limit",
+                "binding": {"kind": "config", "path": "limit_per_sec"},
+                "type": "integer",
+                "domain": {"min": 1, "max": 100, "step": 1},
+                "default": 50,
+                "scale": "linear",
+                "unit": "requests / sec",
+            },
+            {
+                "id": "burst",
+                "label": "burst allowance",
+                "binding": {"kind": "config", "path": "burst"},
+                "type": "integer",
+                "domain": {"min": 0, "max": 50, "step": 1},
+                "default": 10,
+                "scale": "linear",
+                "unit": "requests",
+            },
+            {
                 "id": "rps",
                 "label": "requests per second",
                 "binding": {"kind": "driver", "param": "rps"},
@@ -42,7 +62,17 @@ def _rate_limiter_response() -> dict:
                 "default": 2,
                 "scale": "linear",
                 "unit": "requests / sec",
-            }
+            },
+            {
+                "id": "tenants",
+                "label": "tenant count",
+                "binding": {"kind": "driver", "param": "tenants"},
+                "type": "integer",
+                "domain": {"min": 1, "max": 16, "step": 1},
+                "default": 2,
+                "scale": "linear",
+                "unit": "tenants",
+            },
         ],
         "observables": [
             {

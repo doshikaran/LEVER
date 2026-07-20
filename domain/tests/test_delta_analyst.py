@@ -180,3 +180,18 @@ def test_delta_prompt_exposes_the_registered_execution_contract_generically() ->
     assert '"id": "cartValue", "type": "scalar"' in prompt
     assert '"kind": "config", "path": "cart.cart_value"' in prompt
     assert "no extra knobs" in prompt
+
+
+def test_rate_limiter_prompt_requires_the_tenant_and_burst_controls(
+    hero_scope: ScopedChangeSet, hero_sources: tuple[str, str]
+) -> None:
+    """The registered contract prevents an rps-only live proposal before harnessing."""
+    prompt = _build_prompt(hero_scope, *hero_sources, None)
+
+    assert '"id": "limit_per_sec", "type": "integer"' in prompt
+    assert '"kind": "config", "path": "limit_per_sec"' in prompt
+    assert '"id": "burst", "type": "integer"' in prompt
+    assert '"kind": "config", "path": "burst"' in prompt
+    assert '"id": "rps", "type": "integer"' in prompt
+    assert '"id": "tenants", "type": "integer"' in prompt
+    assert '"requireExactKnobIds": true' in prompt

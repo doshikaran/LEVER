@@ -881,13 +881,32 @@ ENTRY_POINT_REGISTRY: Mapping[str, EntryPointTemplate] = MappingProxyType(
             reference_program=_hero1_reference_program,
             proposal_shape=ProposalShape(
                 workload_description="a rate-limiter request workload",
-                # The template defaults to one tenant when it is not exposed as
-                # a control, so only rps is mandatory for a faithful invocation.
-                required_driver_params=("rps",),
+                # These controls expose the behavioral dimension of this diff:
+                # shared-vs-tenant-scoped admission plus the shared burst pool.
+                # Letting the template silently supply tenants=1 or burst=0
+                # creates a mechanically runnable but behaviorally degenerate
+                # microworld, so all four constructor/workload controls are
+                # required just as strictly as the later hero contracts.
+                required_driver_params=("rps", "tenants"),
                 allowed_binding_kinds=frozenset({"driver", "config"}),
                 required_knobs=(
-                    KnobRequirement("rps", binding_kind="driver"),
+                    KnobRequirement(
+                        "limit_per_sec",
+                        type="integer",
+                        binding_kind="config",
+                        config_path="limit_per_sec",
+                    ),
+                    KnobRequirement(
+                        "burst",
+                        type="integer",
+                        binding_kind="config",
+                        config_path="burst",
+                    ),
+                    KnobRequirement("rps", type="integer", binding_kind="driver"),
+                    KnobRequirement("tenants", type="integer", binding_kind="driver"),
                 ),
+                require_exact_knob_ids=True,
+                expected_control_ids=("limit_per_sec", "burst", "rps", "tenants"),
             ),
         ),
         "next_delay": EntryPointTemplate(

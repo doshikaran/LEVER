@@ -55,10 +55,14 @@ class CacheEntry:
 
 @dataclass(frozen=True)
 class TracePoint:
-    """A cached search point with its final range-normalized divergence."""
+    """One empirical point emitted as the bounded search reaches it."""
 
     position: KnobPosition
     divergence: float
+    # Keeping the phase on the evidence lets presentation distinguish the
+    # evenly spread Sobol exploration from the ascent probes without guessing
+    # from arrival order.
+    phase: Literal["explore", "exploit"] = "explore"
 
 
 @dataclass(frozen=True)
@@ -119,8 +123,9 @@ class Adversary:
         fidelity: FidelityVerification,
         base_source: str | None = None,
         head_source: str | None = None,
+        trace_callback: Callable[[TracePoint], None] | None = None,
     ) -> AdversaryResult:
-        """Find and retain the strongest A/B divergence after successful fidelity."""
+        """Find the strongest divergence and emit every new trace point immediately."""
         if fidelity.report.verdict != "verified":
             raise ValueError("Adversary requires a verified FidelityReport")
 
@@ -136,17 +141,43 @@ class Adversary:
         explore_points = sobol_points(partial_spec.knobs, m=EXPLORE_M)
         explore_keys = {_point_key(point) for point in explore_points}
         cache: dict[str, CacheEntry] = {}
-        for observation in fidelity.observations:
-            if _point_key(observation.point) in explore_keys:
-                self._store(
-                    cache,
-                    observation.point,
-                    ObservationBundle(
-                        observation.base,
-                        observation.head,
-                        observation.trace,
-                    ),
-                )
+        trace_points: list[TracePoint] = []
+        traced_keys: set[str] = set()
+
+        def record_trace(point: dict[str, Any], phase: Literal["explore", "exploit"]) -> None:
+            """Publish an actual cached result at the moment this search adopts it."""
+            key = _point_key(point)
+            # Phase 1 is always the 64-point Sobol design.  Integer/log domains
+            # can quantize two design samples to one cached position, but both
+            # samples still belong in the visible exploration trace.  Exploit
+            # collisions, by contrast, are not new probes and are omitted.
+            if phase == "exploit" and key in traced_keys:
+                return
+            divergence = _divergences(cache, partial_spec.observables, objective)[key]
+            trace_point = TracePoint(cache[key].position, divergence, phase)
+            trace_points.append(trace_point)
+            traced_keys.add(key)
+            _emit_trace(trace_callback, trace_point)
+
+        # Fidelity's Sobol points are already real executions.  Insert and emit
+        # them in the deterministic Phase 1 sequence, so reuse avoids spend
+        # without turning the Search Trace into a completion-only artifact.
+        fidelity_by_key = {
+            _point_key(observation.point): observation for observation in fidelity.observations
+        }
+        for point in explore_points:
+            observation = fidelity_by_key.get(_point_key(point))
+            if observation is None:
+                continue
+            self._store(
+                cache,
+                point,
+                ObservationBundle(
+                    observation.base,
+                    observation.head,
+                    observation.trace,
+                ),
+            )
 
         missing_explore_points = [
             point for point in explore_points if _point_key(point) not in cache
@@ -156,6 +187,13 @@ class Adversary:
             evaluated = zip(missing_explore_points, pool.map(runner, missing_explore_points))
             for point, observations in evaluated:
                 self._store(cache, point, observations)
+
+        # A numeric objective is normalized across the explored value range.
+        # Publish Phase 1 once all 64 real/reused Sobol observations are in the
+        # cache so a dot's live color is its actual search objective, not a
+        # provisional range from an earlier insertion.
+        for point in explore_points:
+            record_trace(point, "explore")
 
         explore_keys = {_point_key(point) for point in explore_points}
         exploit_attempted = 0
@@ -179,6 +217,7 @@ class Adversary:
                 objective,
                 explore_keys,
                 batch_runner,
+                record_trace,
             )
             exploit_attempted += accounting[0]
             exploit_executed_new += accounting[1]
@@ -194,6 +233,7 @@ class Adversary:
                     objective,
                     runner,
                     explore_keys,
+                    record_trace,
                 )
                 exploit_attempted += accounting[0]
                 exploit_executed_new += accounting[1]
@@ -213,10 +253,7 @@ class Adversary:
         )
 
         divergences = _divergences(cache, partial_spec.observables, objective)
-        trace = tuple(
-            TracePoint(entry.position, divergences[key])
-            for key, entry in cache.items()
-        )
+        trace = tuple(trace_points)
         best_key = max(divergences, key=divergences.get)
         best = cache[best_key]
         best_divergence = divergences[best_key]
@@ -265,6 +302,7 @@ class Adversary:
         objective: SearchObjective,
         runner: EvaluationRunner,
         explore_keys: set[str],
+        record_trace: Callable[[dict[str, Any], Literal["explore", "exploit"]], None],
     ) -> tuple[int, int, int, int]:
         """Use eight bounded neighbor probes, halving numeric steps after misses."""
         current = dict(seed)
@@ -285,7 +323,9 @@ class Adversary:
                     collisions_with_exploit += 1
             else:
                 executed_new += 1
-            self._evaluate(cache, candidate, runner)
+            _, added = self._evaluate(cache, candidate, runner)
+            if added:
+                record_trace(candidate, "exploit")
             divergences = _divergences(cache, observables, objective)
             if divergences[_point_key(candidate)] > divergences[_point_key(current)]:
                 current = candidate
@@ -311,6 +351,7 @@ class Adversary:
         objective: SearchObjective,
         explore_keys: set[str],
         evaluate_many: BatchEvaluationRunner,
+        record_trace: Callable[[dict[str, Any], Literal["explore", "exploit"]], None],
     ) -> tuple[int, int, int, int]:
         """Run one ascent round for every seed per warm-sandbox transport call."""
         states = [
@@ -353,6 +394,7 @@ class Adversary:
                 fresh_observations = evaluate_many(fresh_points)
                 for point, observations in zip(fresh_points, fresh_observations, strict=True):
                     self._store(cache, point, observations)
+                    record_trace(point, "exploit")
 
             divergences = _divergences(cache, observables, objective)
             for state, candidate in candidates:
@@ -379,14 +421,16 @@ class Adversary:
         cache: dict[str, CacheEntry],
         point: dict[str, Any],
         runner: EvaluationRunner,
-    ) -> ObservationBundle:
+    ) -> tuple[ObservationBundle, bool]:
         """Retain every actual evaluation and never rerun an already cached position."""
         key = _point_key(point)
+        added = False
         if key not in cache:
             if len(cache) >= MAX_EVALUATIONS:
                 raise RuntimeError("Adversary exceeded its 128-evaluation hard cap")
             self._store(cache, point, runner(point))
-        return cache[key].observations
+            added = True
+        return cache[key].observations, added
 
     @staticmethod
     def _store(
@@ -495,6 +539,20 @@ def _objective_for(domain_pack: DomainPackId) -> SearchObjective:
     if domain_pack is DomainPackId.DECISION_TREE:
         return "max_path_divergence"
     return "normalized_divergence"
+
+
+def _emit_trace(
+    callback: Callable[[TracePoint], None] | None,
+    trace_point: TracePoint,
+) -> None:
+    """Deliver evidence to a presentation adapter without changing the search result."""
+    if callback is None:
+        return
+    try:
+        callback(trace_point)
+    except Exception:
+        # A dropped WebSocket must never alter the bounded empirical search.
+        return
 
 
 def _divergences(

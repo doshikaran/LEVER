@@ -4,6 +4,7 @@ import { KnobPanel } from './components/KnobPanel'
 import { DegradationPanel } from './components/DegradationPanel'
 import { SourceViewer } from './components/SourceViewer'
 import { UnionTree } from './components/UnionTree'
+import { SearchTrace } from './components/SearchTrace'
 import { useMicroworldStore } from './store/useMicroworldStore'
 import type {
   CompleteEvent,
@@ -13,6 +14,8 @@ import type {
   ObservationBundle,
   ProgressEvent,
   ResponsibleLine,
+  SearchTraceEvent,
+  SearchTracePoint,
   SourceFiles,
   WidgetConfig,
 } from './types'
@@ -100,6 +103,7 @@ function App() {
   const replaceCache = useMicroworldStore((state) => state.replaceCache)
   const putCachedObservation = useMicroworldStore((state) => state.putCachedObservation)
   const [progress, setProgress] = useState<ProgressEvent[]>([])
+  const [searchTrace, setSearchTrace] = useState<SearchTracePoint[]>([])
   const [widget, setWidget] = useState<WidgetConfig | null>(null)
   const [changeId, setChangeId] = useState<string | null>(null)
   const [degradation, setDegradation] = useState<DegradationEvent | null>(null)
@@ -116,6 +120,7 @@ function App() {
   const pendingRequests = useRef(new Map<string, PendingRequest>())
   const positionVersion = useRef(0)
   const dragSettleTimer = useRef<number | undefined>(undefined)
+  const selectedTracePosition = useRef<KnobPosition | null>(null)
 
   const evaluatePosition = useCallback(async (nextPosition: KnobPosition, version: number) => {
     // A new input invalidates a prior source selection immediately.  Do this
@@ -169,10 +174,15 @@ function App() {
             setProgress((current) => [...current, event as ProgressEvent])
             return
           }
+          if (event.type === 'search_trace') {
+            const traceEvent = event as SearchTraceEvent
+            setSearchTrace((current) => [...current, traceEvent.tracePoint])
+            return
+          }
           if (event.type === 'complete') {
             const complete = event as CompleteEvent
             replaceCache(new Map(Object.entries(complete.positionCache)))
-            replacePosition(complete.widgetConfig.initialPosition)
+            replacePosition(selectedTracePosition.current ?? complete.widgetConfig.initialPosition)
             setDegradation(null)
             setWidget(complete.widgetConfig)
             setChangeId(complete.changeId)
@@ -196,6 +206,8 @@ function App() {
             setSelectedLine(null)
             setAttributionMessage(null)
             setPinStatus(null)
+            setSearchTrace([])
+            selectedTracePosition.current = null
             replacePosition({})
             replaceCache(new Map())
             setError(null)
@@ -318,6 +330,13 @@ function App() {
     }
   }, [changeId, hasCurrentObservation, observedPosition])
 
+  const selectSearchPosition = useCallback((nextPosition: KnobPosition) => {
+    // Search Trace clicks use the same Zustand position and cache-forward
+    // evaluation path as knob drags. They never synthesize an inverse query.
+    selectedTracePosition.current = { ...nextPosition }
+    replacePosition(nextPosition)
+  }, [replacePosition])
+
   return (
     <main className="min-h-screen bg-[var(--lever-background)] px-6 py-6 text-[var(--lever-text)]">
       <div className="mx-auto max-w-6xl space-y-6">
@@ -338,6 +357,14 @@ function App() {
         {error ? <p role="alert" className="text-sm text-[var(--lever-warning)]">{error}</p> : null}
 
         {degradation ? <DegradationPanel event={degradation} /> : null}
+
+        {!degradation && searchTrace.length > 0 ? (
+          <SearchTrace
+            points={searchTrace}
+            controls={widget?.controls ?? []}
+            onSelectPosition={selectSearchPosition}
+          />
+        ) : null}
 
         {!degradation && widget && (unionTree !== null || (chart && values)) ? (
           <section className="grid gap-8 lg:grid-cols-[18rem_minmax(0,1fr)]">

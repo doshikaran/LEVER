@@ -6,8 +6,11 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 from domain.harness_engineer import (
     HarnessEngineer,
+    UnsupportedTemplateProposal,
     VerifierFeedback,
     retry_plan,
     run_retry_loop,
@@ -77,6 +80,23 @@ def test_harness_engineer_generates_a_symmetric_zero_stub_hero1_pair() -> None:
     assert pair.uncertainty_specs == ()
     assert pair.workload_driver.parameters == ("rps", "tenants")
     assert pair.harness_a.source.replace('"/tmp/lever/base.py"', '"MODULE"') == pair.harness_b.source.replace('"/tmp/lever/head.py"', '"MODULE"')
+
+
+def test_rate_limiter_contract_rejects_the_live_rps_only_proposal() -> None:
+    """A one-dimensional rate sweep cannot hide tenant/burst behavior any longer."""
+    full_spec = _hero_spec()
+    rps_only = full_spec.model_copy(update={"knobs": [full_spec.knobs[2]]})
+
+    with pytest.raises(UnsupportedTemplateProposal) as error:
+        HarnessEngineer().generate(
+            _hero_scope(), rps_only, "/tmp/lever/base.py", "/tmp/lever/head.py"
+        )
+
+    assert str(error.value) == (
+        "registered template for 'RateLimiter.admit' expects a rate-limiter request "
+        "workload (limit_per_sec/burst/rps/tenants); proposed spec is knobs with "
+        "bindings rps:driver, which this template does not support"
+    )
 
 
 def test_harness_retry_state_machine_advances_after_a_scripted_failure() -> None:

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from domain.adversary import AdversaryResult, CacheEntry, ObservationBundle
+from domain.adversary import AdversaryResult, CacheEntry, ObservationBundle, TracePoint
 from domain.orchestrator import (
     DegradeResult,
     GracefulDegradation,
@@ -116,6 +116,7 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
         reasoning_effort,
         progress_callback,
         adversary_callback,
+        search_trace_callback,
     ) -> InteractionSpec | DegradeResult:
         for stage, message in (
             ("files_touched", "1 file touched."),
@@ -124,6 +125,14 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
             ("building", "Building you something to pull on…"),
         ):
             progress_callback(stage, message)
+        # These arrive before the terminal result, mirroring a live Sobol
+        # exploration point followed by a coordinate-ascent probe.
+        search_trace_callback(
+            TracePoint(KnobPosition({"rps": 1}), 0.05, "explore")
+        )
+        search_trace_callback(
+            TracePoint(KnobPosition({"rps": 3}), 0.5, "exploit")
+        )
         adversary_callback(
             AdversaryResult(
                 initial_position=KnobPosition({"rps": 3}),
@@ -187,7 +196,7 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
         change_id = accepted.json()["changeId"]
 
         with client.websocket_connect(f"/ws/{change_id}") as websocket:
-            messages = [websocket.receive_json() for _ in range(5)]
+            messages = [websocket.receive_json() for _ in range(7)]
             pinned = client.post(f"/diffs/{change_id}/pin", json={"position": {"rps": 3}})
             websocket.send_json(
                 {"type": "evaluate", "requestId": "off-cache", "position": {"rps": 4}}
@@ -205,6 +214,20 @@ def test_post_returns_immediately_and_websocket_replays_progress_then_widget_cac
         "old_vs_new",
         "building",
     ]
+    assert [message["type"] for message in messages[4:6]] == [
+        "search_trace",
+        "search_trace",
+    ]
+    assert messages[4]["tracePoint"] == {
+        "position": {"rps": 1.0},
+        "divergence": 0.05,
+        "phase": "explore",
+    }
+    assert messages[5]["tracePoint"] == {
+        "position": {"rps": 3.0},
+        "divergence": 0.5,
+        "phase": "exploit",
+    }
     final = messages[-1]
     assert final["type"] == "complete"
     assert pinned.status_code == 200
@@ -291,6 +314,7 @@ def test_hero_result_is_frozen_without_reinvoking_orchestrator(
         reasoning_effort,
         progress_callback=None,
         adversary_callback=None,
+        search_trace_callback=None,
     ) -> InteractionSpec | DegradeResult:
         nonlocal calls
         calls += 1

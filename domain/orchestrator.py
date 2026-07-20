@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from domain.adversary import Adversary, AdversaryResult
+from domain.adversary import Adversary, AdversaryResult, TracePoint
 from domain.delta_analyst import DeltaAnalyst, numeric_fn_fallback
 from domain.entry_point_registry import get_entry_point_template
 from domain.fidelity_verifier import FidelityVerification, FidelityVerifier
@@ -85,8 +85,9 @@ def run_pipeline(
     reasoning_effort: str,
     progress_callback: Callable[[str, str], None] | None = None,
     adversary_callback: Callable[[AdversaryResult], None] | None = None,
+    search_trace_callback: Callable[[TracePoint], None] | None = None,
 ) -> InteractionSpec | DegradeResult:
-    """Execute Part 5 and optionally report completed stages and search artifacts."""
+    """Execute Part 5 and optionally publish real-time search evidence."""
     base_path = Path(base_file_path)
     head_path = Path(head_file_path)
     base_source = base_path.read_text()
@@ -303,6 +304,7 @@ def run_pipeline(
                 fidelity,
                 base_source,
                 head_source,
+                trace_callback=search_trace_callback,
             )
             if adversary_callback is not None:
                 adversary_callback(adversary_result)

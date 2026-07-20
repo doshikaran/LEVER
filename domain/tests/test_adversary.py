@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from domain.adversary import Adversary, EXPLORE_POINTS, MAX_EVALUATIONS, ObservationBundle
+from domain.adversary import (
+    Adversary,
+    EXPLORE_POINTS,
+    MAX_EVALUATIONS,
+    ObservationBundle,
+    TracePoint,
+)
 from domain.fidelity_verifier import FidelityObservation, FidelityVerification, sobol_points
 from domain.harness_engineer import HarnessEngineer
 from domain.schema import (
@@ -87,8 +93,9 @@ def test_adversary_reuses_fidelity_explore_points_and_caches_the_search() -> Non
     pair = HarnessEngineer().generate(
         _hero_scope(), _hero_spec(), "/tmp/base.py", "/tmp/head.py"
     )
+    streamed: list[TracePoint] = []
     result = Adversary(runtime, runner).search(
-        sandbox_id, pair, spec, fidelity
+        sandbox_id, pair, spec, fidelity, trace_callback=streamed.append
     )
 
     assert not result.no_divergence
@@ -98,8 +105,16 @@ def test_adversary_reuses_fidelity_explore_points_and_caches_the_search() -> Non
     assert len(calls) == len(result.cache) - EXPLORE_POINTS
     assert len(calls) <= MAX_EVALUATIONS - EXPLORE_POINTS
     assert len(result.cache) <= MAX_EVALUATIONS
-    assert len(result.search_trace) == len(result.cache)
     assert result.accounting is not None
+    # The trace preserves all 64 Sobol samples even when a discrete/log domain
+    # quantizes two samples to the same memoized KnobPosition.
+    assert len(result.search_trace) == (
+        EXPLORE_POINTS + result.accounting.exploit_executed_new
+    )
+    assert streamed == list(result.search_trace)
+    assert len(streamed[:EXPLORE_POINTS]) == EXPLORE_POINTS
+    assert all(point.phase == "explore" for point in streamed[:EXPLORE_POINTS])
+    assert all(point.phase == "exploit" for point in streamed[EXPLORE_POINTS:])
     assert result.accounting.explore_reused_from_fidelity == EXPLORE_POINTS
     assert result.accounting.exploit_attempted == MAX_EVALUATIONS - EXPLORE_POINTS
     assert result.accounting.exploit_unattempted == 0

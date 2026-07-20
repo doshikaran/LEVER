@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from domain import orchestrator
-from domain.adversary import AdversaryResult, CacheEntry
+from domain.adversary import AdversaryResult, CacheEntry, TracePoint
 from domain.harness_engineer import HarnessEngineer
 from domain.line_attribution import trace_attribution
 from domain.orchestrator import DegradeResult, GracefulDegradation
@@ -54,8 +54,19 @@ HERO_FIXTURES: dict[str, tuple[Path, Path]] = {
 
 ProgressCallback = Callable[[str, str], None]
 AdversaryCallback = Callable[[AdversaryResult], None]
+SearchTraceCallback = Callable[[TracePoint], None]
 PipelineRunner = Callable[
-    [str, str, SandboxRuntime, LLMClient, str, str, ProgressCallback, AdversaryCallback],
+    [
+        str,
+        str,
+        SandboxRuntime,
+        LLMClient,
+        str,
+        str,
+        ProgressCallback,
+        AdversaryCallback,
+        SearchTraceCallback,
+    ],
     InteractionSpec | DegradeResult,
 ]
 EvaluationRunner = Callable[
@@ -125,6 +136,20 @@ class _RunState:
     def set_adversary_result(self, result: AdversaryResult) -> None:
         """Store every retained KnobPosition → ObservationBundle for client lookup."""
         self.position_cache = _cache_from_adversary(result)
+
+    def add_search_trace_point(self, trace_point: TracePoint) -> None:
+        """Queue one actual Adversary evaluation for immediate WebSocket delivery."""
+        self.events.append(
+            {
+                "type": "search_trace",
+                "tracePoint": {
+                    "position": trace_point.position.root,
+                    "divergence": trace_point.divergence,
+                    "phase": trace_point.phase,
+                },
+            }
+        )
+        self.wake.set()
 
     def finish(self, payload: dict[str, Any]) -> None:
         """Record the one terminal message and wake every waiting websocket."""
@@ -380,6 +405,9 @@ async def _run_in_background(
     def on_adversary(result: AdversaryResult) -> None:
         loop.call_soon_threadsafe(state.set_adversary_result, result)
 
+    def on_search_trace(trace_point: TracePoint) -> None:
+        loop.call_soon_threadsafe(state.add_search_trace_point, trace_point)
+
     def invoke() -> InteractionSpec | DegradeResult:
         return pipeline_runner(
             str(base_path),
@@ -390,6 +418,7 @@ async def _run_in_background(
             reasoning_effort,
             on_progress,
             on_adversary,
+            on_search_trace,
         )
 
     try:
@@ -540,6 +569,7 @@ def _run_hero_pipeline(
         reasoning_effort,
         lambda _stage, _message: None,
         collect_adversary,
+        lambda _trace_point: None,
     )
     return _terminal_payload(
         hero_key,
@@ -635,6 +665,7 @@ def _run_pipeline_with_callbacks(
     reasoning_effort: str,
     progress_callback: ProgressCallback,
     adversary_callback: AdversaryCallback,
+    search_trace_callback: SearchTraceCallback,
 ) -> InteractionSpec | DegradeResult:
     """Adapt the public orchestrator to the interface runner's callback shape."""
     return orchestrator.run_pipeline(
@@ -646,6 +677,7 @@ def _run_pipeline_with_callbacks(
         reasoning_effort,
         progress_callback=progress_callback,
         adversary_callback=adversary_callback,
+        search_trace_callback=search_trace_callback,
     )
 
 
