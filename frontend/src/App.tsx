@@ -651,7 +651,7 @@ function App() {
             <div className="space-y-3">
               <p className="text-sm text-[var(--lever-text)]" aria-live="polite">{status}</p>
               {unionTree ? (
-                <UnionTree tree={unionTree} />
+                <UnionTree tree={unionTree} onSelectPosition={selectSearchPosition} />
               ) : chart && values ? (
                 <MicroworldCanvas
                   widget={widget}
