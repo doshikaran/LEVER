@@ -480,6 +480,21 @@ cd frontend && npm test
 
 **Architecture:** hexagonal - `domain/` is pure logic behind `Protocol` ports (`domain/ports.py`); adapters for OpenAI, E2B, GitHub, and SQLite live in `infra/`; `interface/api.py` is the FastAPI edge.
 
+### Where the E2B sandbox runs — the "we actually ran it" guarantee
+
+> **Every claim LEVER makes is backed by real code executed inside an isolated E2B sandbox, never on the host and never inferred from a summary.** The sandbox *is* the trust layer: if it can't run, LEVER degrades honestly instead of guessing.
+
+The domain only ever talks to a `SandboxRuntime` port (`domain/ports.py`); the live adapter is `E2BSandboxRuntime` (`infra/sandbox/e2b_adapter.py`), and tests use `FakeSandboxRuntime` so no test touches the network. Real code is executed in the sandbox at **six** points:
+
+- **Harness probe** (`domain/harness_engineer.py`) - every model-generated harness is *run* in the sandbox to prove it's actually executable before it's trusted.
+- **Byte-identity check** (`domain/fidelity_verifier.py`) - the Symmetrist runs both harnesses to prove they are byte-for-byte symmetric (no version gets an unfair advantage).
+- **Differential test** (`domain/fidelity_verifier.py`) - the real old vs. new code is executed across a Sobol K=128 sample; only ≥ 0.85 measured agreement authorizes a playable toy.
+- **Adversary search** (`domain/adversary.py`) - up to 128 executions hunt for the maximum-divergence input, caching every measured point.
+- **Composed microworlds** (`domain/composed_microworld.py`) - each 2×2 composed position is evaluated live in the sandbox.
+- **Interactive play** (`interface/api.py`) - every knob drag / timeline position the user triggers is a fresh real execution in the sandbox, not interpolation.
+
+The orchestrator (`domain/orchestrator.py`) owns the sandbox lifecycle and converts any `SandboxExecutionError` into an honest degradation card. Everything else - the Triager, Scout's static core, the Symmetrist math, the Assayer's confidence statistics, and the Synthesizer's rendering switch - is pure deterministic code that **never** calls a sandbox (or a model), by design.
+
 ## 14 · Installation & configuration
 
 **Supported platforms:** macOS and Linux (developed on macOS; the sandbox and toolchain are POSIX‑oriented).
