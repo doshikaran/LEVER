@@ -557,6 +557,76 @@ def test_prospective_never_marks_any_of_three_candidates_as_verified(tmp_path) -
     repository.close()
 
 
+def test_prospective_combined_ledger_entry_has_non_blank_thesis(tmp_path) -> None:
+    """The combined payload saved under the plain changeId must carry the hypothesis as its thesis.
+
+    Without this, the Session Ledger (which renders one line per entry from
+    `entry["thesis"]`) shows a blank, still-clickable row for every prospective
+    run -- the combined `{"candidates": [...]}` payload has no single
+    InteractionSpec to draw a thesis from, unlike each per-candidate entry.
+    """
+    base = tmp_path / "current.py"
+    base.write_text("class RateLimiter:\n    pass\n")
+    candidate_sources = [
+        _rate_limiter_candidate_source("return True"),
+        _rate_limiter_candidate_source("return False"),
+        _rate_limiter_candidate_source("return now > 0"),
+    ]
+    candidate_dir = tmp_path / "candidates"
+
+    def prospective_runner(
+        base_path,
+        head_path,
+        sandbox,
+        llm,
+        model,
+        reasoning_effort,
+        progress_callback,
+        adversary_callback,
+        search_trace_callback,
+    ) -> InteractionSpec:
+        return _spec()
+
+    repository = SQLiteRepository(tmp_path / "prospective.sqlite3")
+    app = create_app(
+        repository=repository,
+        runtime_factory=lambda: object(),
+        llm_factory=lambda _model, _effort: FakeLLMClient(
+            [
+                {"source": source, "summary": f"Candidate {index}."}
+                for index, source in enumerate(candidate_sources)
+            ]
+        ),
+        prospective_pipeline_runner=prospective_runner,
+        prospective_candidate_dir=candidate_dir,
+    )
+    hypothesis = "what if the burst allowance were per-tenant instead of shared?"
+    with TestClient(app) as client:
+        accepted = client.post(
+            "/prospective",
+            json={"base_file_path": str(base), "hypothesis": hypothesis},
+        )
+        change_id = accepted.json()["changeId"]
+        with client.websocket_connect(f"/ws/{change_id}") as websocket:
+            terminal = websocket.receive_json()
+
+    assert terminal["thesis"]
+    assert hypothesis in terminal["thesis"]
+
+    persisted = repository.load(change_id)
+    assert persisted["thesis"]
+    assert hypothesis in persisted["thesis"]
+
+    # The Session Ledger's GET /ledger surfaces list_entries() verbatim, so
+    # this combined entry must not be the blank row a missing "thesis" would
+    # otherwise render.
+    ledger_entries = repository.list_entries()
+    combined_entry = next(entry for entry in ledger_entries if entry["changeId"] == change_id)
+    assert combined_entry["thesis"]
+    assert hypothesis in combined_entry["thesis"]
+    repository.close()
+
+
 def test_prospective_candidate_exception_does_not_discard_other_candidates_results(
     tmp_path,
 ) -> None:

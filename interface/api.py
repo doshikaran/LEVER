@@ -725,6 +725,14 @@ async def _run_prospective_in_background(
         {
             "type": "complete",
             "changeId": state.change_id,
+            # Same listing-surface convenience field as _terminal_payload's
+            # "thesis" (used for single-candidate runs): the Session Ledger
+            # renders one line per entry from this field, and a combined
+            # prospective payload has no single InteractionSpec to draw a
+            # thesis from, so the user's own hypothesis text -- the only
+            # honest, already-available identifier for this entry -- stands
+            # in for it.
+            "thesis": f"Prospective: {hypothesis}",
             "candidates": payloads,
         },
     )
