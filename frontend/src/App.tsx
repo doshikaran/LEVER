@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { MicroworldCanvas, ProspectiveCandidateRow } from './components/MicroworldCanvas'
 import type { ProspectiveCandidateView } from './components/MicroworldCanvas'
 import { KnobPanel } from './components/KnobPanel'
@@ -204,7 +205,18 @@ function App() {
   const [objectiveFinding, setObjectiveFinding] = useState<string | null>(null)
   const [hypothesis, setHypothesis] = useState('')
   const [prospectivePending, setProspectivePending] = useState(false)
-  const [ledgerEntries, setLedgerEntries] = useState<readonly LedgerEntry[]>([])
+  const ledgerQuery = useQuery({
+    queryKey: ['ledger'],
+    queryFn: async () => {
+      const response = await fetch(`${API_BASE}/ledger`)
+      if (!response.ok) throw new Error(`Ledger request failed (${response.status}).`)
+      return response.json() as Promise<{ entries?: readonly LedgerEntry[] }>
+    },
+  })
+  const ledgerEntries = useMemo<readonly LedgerEntry[]>(
+    () => (ledgerQuery.data?.entries ?? []).map((entry) => ({ changeId: entry.changeId, thesis: entry.thesis })),
+    [ledgerQuery.data],
+  )
   const socket = useRef<WebSocket | null>(null)
   const pendingRequests = useRef(new Map<string, PendingRequest>())
   const pendingGridResolvers = useRef(
@@ -481,26 +493,29 @@ function App() {
     }
   }, [applyComplete, applyDegradation, applyProspectiveComplete])
 
-  // On first mount: open a changeId named in the URL (the permalink path),
-  // and load the Session Ledger sidebar's listing. Runs once; switching
-  // heroes afterward does not re-trigger either of these.
+  const submitDiffMutation = useMutation({
+    mutationFn: async ({ hero, signal }: Readonly<{ hero: HeroConfig; signal: AbortSignal }>) => {
+      const response = await fetch(`${API_BASE}/diffs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(hero),
+        signal,
+      })
+      if (!response.ok) throw new Error(`Diff request failed (${response.status}).`)
+      return response.json() as Promise<{ changeId: string }>
+    },
+  })
+
+  // On first mount: open a changeId named in the URL (the permalink path).
+  // The Session Ledger sidebar's listing is loaded separately by ledgerQuery
+  // above (a TanStack Query useQuery, fetched on mount by React Query itself).
+  // Runs once; switching heroes afterward does not re-trigger it.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const targetChangeId = params.get('changeId')
     if (targetChangeId) {
       void openChangeId(targetChangeId)
     }
-    fetch(`${API_BASE}/ledger`)
-      .then((response) => response.json())
-      .then((data: { entries?: readonly { changeId: string; thesis: string }[] }) => {
-        setLedgerEntries(
-          (data.entries ?? []).map((entry) => ({ changeId: entry.changeId, thesis: entry.thesis })),
-        )
-      })
-      .catch(() => {
-        // The ledger sidebar is a convenience listing; a failure here must
-        // not block or error out the primary hero-diff view.
-      })
   }, [openChangeId])
 
   useEffect(() => {
@@ -555,14 +570,7 @@ function App() {
 
     async function start() {
       try {
-        const response = await fetch(`${API_BASE}/diffs`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(selectedHero),
-          signal: controller.signal,
-        })
-        if (!response.ok) throw new Error(`Diff request failed (${response.status}).`)
-        const { changeId } = (await response.json()) as { changeId: string }
+        const { changeId } = await submitDiffMutation.mutateAsync({ hero: selectedHero, signal: controller.signal })
         connectToChange(changeId)
       } catch (reason) {
         if (!disposed) setError(reason instanceof Error ? reason.message : 'Could not start Lever.')
@@ -576,7 +584,7 @@ function App() {
       rejectPendingGridResolvers('Hero changed before this position could be evaluated')
       socket.current?.close()
     }
-  }, [connectToChange, selectedHeroId, selectedHero, replaceCache, replacePosition, rejectPendingGridResolvers, hadChangeIdOnMount, hasUserSelectedHero])
+  }, [connectToChange, selectedHeroId, selectedHero, replaceCache, replacePosition, rejectPendingGridResolvers, hadChangeIdOnMount, hasUserSelectedHero, submitDiffMutation.mutateAsync])
 
   useEffect(() => {
     if (widget === null || degradation !== null || Object.keys(position).length === 0) return
@@ -669,6 +677,21 @@ function App() {
     && canonicalPosition(observedPosition) === canonicalPosition(position)
   )
 
+  const pinMutation = useMutation({
+    mutationFn: async ({ changeId: targetChangeId, position: pinnedPosition }: Readonly<{ changeId: string; position: KnobPosition }>) => {
+      const response = await fetch(`${API_BASE}/diffs/${targetChangeId}/pin`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ position: pinnedPosition }),
+      })
+      const payload = await response.json() as { testPath?: string; detail?: string }
+      if (!response.ok || payload.testPath === undefined) {
+        throw new Error(payload.detail ?? `Pin request failed (${response.status}).`)
+      }
+      return payload as { testPath: string }
+    },
+  })
+
   const pinCurrentPosition = useCallback(async () => {
     if (changeId === null || observedPosition === null || !hasCurrentObservation) {
       setPinStatus('Evaluate this exact position before pinning it.')
@@ -676,20 +699,12 @@ function App() {
     }
     setPinStatus('Writing regression test…')
     try {
-      const response = await fetch(`${API_BASE}/diffs/${changeId}/pin`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ position: observedPosition }),
-      })
-      const payload = await response.json() as { testPath?: string; detail?: string }
-      if (!response.ok || payload.testPath === undefined) {
-        throw new Error(payload.detail ?? `Pin request failed (${response.status}).`)
-      }
+      const payload = await pinMutation.mutateAsync({ changeId, position: observedPosition })
       setPinStatus(`Pinned regression test: ${payload.testPath}`)
     } catch (reason) {
       setPinStatus(reason instanceof Error ? reason.message : 'Could not write the regression test.')
     }
-  }, [changeId, hasCurrentObservation, observedPosition])
+  }, [changeId, hasCurrentObservation, observedPosition, pinMutation.mutateAsync])
 
   const selectSearchPosition = useCallback((nextPosition: KnobPosition) => {
     // Search Trace clicks use the same Zustand position and cache-forward

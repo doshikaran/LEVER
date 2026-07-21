@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useMicroworldStore } from './store/useMicroworldStore'
+import { renderWithQueryClient as render } from './test/renderWithQueryClient'
 
 vi.mock('./components/KnobPanel', () => ({
   KnobPanel: () => <div data-testid="knob-panel">controls</div>,
