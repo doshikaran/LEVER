@@ -1,12 +1,16 @@
-# Lever
+# LEVER
 
-### Turn a code diff into a *verified, playable* microworld.
+### Don't read the diff. Play it.
 
 > **Category:** Education · Developer Tools
 > **Built with:** OpenAI Codex + GPT‑5.6 · E2B sandboxes · FastAPI · React
 > **One line:** Paste a GitHub PR → an 8‑agent pipeline checks out both versions, executes the *real changed code* in a sandbox, differential‑tests old vs. new, and hands you a playable game of the behavioral change - or refuses honestly when it cannot prove the toy.
 
-Lever is a PR‑review surface where understanding a change is a **motor act** (you drag a knob and watch old vs. new diverge) **backed by a measured claim** (nothing is rendered unless a differential test against the real code passed). Every competitor sells you a *summary* of a diff. Lever sells you a *playable differential* you can verify.
+It's 4:47pm. An agent hands you back a 640-line diff. You read every line. You understand the syntax. You have no idea what the system will do at 3am on Black Friday when one tenant hammers it at 400 requests a second because reading code and knowing its behavior are two different skills, and only one of them scales to how fast agents write code now.
+
+**LEVER is the second skill, automated**. Paste a GitHub PR. An eight-agent pipeline checks out both versions, builds a byte-symmetric harness for each, and executes the real changed code - not a summary of it — inside an isolated sandbox. It differential-tests old against new across 128 sampled inputs, measures its own confidence from three independent quantities, and only then hands you a playable microworld: drag a knob, watch old and new diverge, live. If it can't prove the harness is faithful, it says so — specifically, with a reason and shows you nothing rather than something fake.
+
+Every other tool in this space sells you a paragraph an LLM wrote about your diff. LEVER sells you a differential you can verify, because it ran.
 
 ---
 
@@ -28,9 +32,7 @@ Lever is a PR‑review surface where understanding a change is a **motor act** (
 14. [Installation & configuration](#14--installation--configuration)
 15. [Built with Codex](#15--built-with-codex)
 16. [Known limitations](#16--known-limitations-stated-on-purpose)
-17. [New vs. prior work](#17--new-vs-prior-work--codex-evidence)
-18. [Repository layout](#18--repository-layout)
-19. [License](#19--license)
+17. [License](#19--license)
 
 ---
 
@@ -51,11 +53,11 @@ The gap: **there is no tool that lets a reviewer interactively see, and trust, h
 
 ## 2 · The solution
 
-Lever closes that gap with one hard commitment:
+LEVER closes that gap with one hard commitment:
 
 > **It executes the real changed code in a sandbox and differential‑tests the microworld against that code. Only measured agreement may authorize a playable toy. If it cannot prove fidelity, it refuses - and still leaves you something useful.**
 
-Concretely, for a PR Lever will:
+Concretely, for a PR LEVER will:
 
 1. **Check out both versions** (base and head) into isolated worktrees.
 2. **Build a symmetric harness** - two runnable programs identical *byte‑for‑byte* except for which version of the code they import.
@@ -69,18 +71,18 @@ The result is a **playable differential**: a small interactive world where the m
 
 ## 3 · Why two tracks: Developer Tools + Education
 
-**Developer Tools** - Lever is a PR‑review and behavioral‑diff tool for engineers: paste a PR, get a verified interactive model of what changed, pin a divergence as a regression test, share a permalink to a live microworld. It targets code review, regression discovery, and "behavioral merge conflict" detection between two PRs.
+**Developer Tools** - LEVER is a PR‑review and behavioral‑diff tool for engineers: paste a PR, get a verified interactive model of what changed, pin a divergence as a regression test, share a permalink to a live microworld. It targets code review, regression discovery, and "behavioral merge conflict" detection between two PRs.
 
-**Education** - the same engine is a powerful learning surface. Abstract CS concepts - rate limiting, exponential backoff with jitter, access‑control inheritance, finite‑state machines, feature‑flag branch logic - become **interactive, verified simulations** a student can *play with* rather than read about. Because every animation is provably tied to real executed code (not a hand‑waved teaching applet), learners build correct intuition. Instructors can turn any small code change into a "what does this actually do?" microworld, and the "Break the PR" mode gamifies finding where two implementations disagree. Lever teaches the single most important review skill - *how a change to code changes behavior* - by making it a game.
+**Education** - the same engine is a powerful learning surface. Abstract CS concepts - rate limiting, exponential backoff with jitter, access‑control inheritance, finite‑state machines, feature‑flag branch logic - become **interactive, verified simulations** a student can *play with* rather than read about. Because every animation is provably tied to real executed code (not a hand‑waved teaching applet), learners build correct intuition. Instructors can turn any small code change into a "what does this actually do?" microworld, and the "Break the PR" mode gamifies finding where two implementations disagree. LEVER teaches the single most important review skill - *how a change to code changes behavior* - by making it a game.
 
 ## 4 · Quick start
 
-> Judges can test Lever without rebuilding it from scratch. Fastest path is a curated demo; you can also paste a real PR.
+> Judges can test LEVER without rebuilding it from scratch. Fastest path is a curated demo; you can also paste a real PR.
 
 **Prerequisites:** Python 3.12, Node ≥ 20.19, an `OPENAI_API_KEY`, an `E2B_API_KEY` (sandbox execution), and optionally a `GITHUB_TOKEN` (private repos / higher rate limits).
 
 ```bash
-cd lever
+cd LEVER
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env          # fill OPENAI_API_KEY, E2B_API_KEY, (optional) GITHUB_TOKEN
@@ -97,7 +99,7 @@ Open the printed UI URL (default `http://127.0.0.1:5173`). Health check: `GET ht
 **Two ways to try it:**
 
 - **Curated demo (surefire):** click a Hero chip (e.g. *Hero 1 - rate limiter*). You'll get the full Arena microworld.
-- **Real PR:** paste a **public GitHub PR whose diff modifies one self‑contained function that takes plain data** (ints/strings/enums - no live `db`/request/session objects). Lever resolves it, checks out both commits, and renders the verified microworld - or an honest degradation.
+- **Real PR:** paste a **public GitHub PR whose diff modifies one self‑contained function that takes plain data** (ints/strings/enums - no live `db`/request/session objects). LEVER resolves it, checks out both commits, and renders the verified microworld - or an honest degradation.
 
 > ⚠️ **Demo tip:** run the backend **without `uvicorn --reload`**. With reload on, the file watcher sees the PR checkout land under `data/checkouts/` and restarts the server mid‑run, killing the analysis. To keep reload while developing, scope it: `--reload-dir interface --reload-dir domain --reload-dir infra`.
 
@@ -106,58 +108,73 @@ Open the printed UI URL (default `http://127.0.0.1:5173`). Health check: `GET ht
 The trust pipeline - eight agents, four guardrails, two feedback loops, and the honest‑degradation exit:
 
 ```mermaid
-flowchart TD
-    U([Paste PR URL / ref pair / demo chip]) --> INTAKE
+flowchart LR
+  %% Entry
+  U([PR URL / ref pair / demo chip])
 
-    subgraph INTAKE_STAGE[Intake and checkout]
-        INTAKE[0 · Intake<br/>resolve PR to base and head SHAs] --> CO[Dual checkout<br/>/w/base and /w/head worktrees]
-    end
+  %% Intake
+  subgraph S1[Intake]
+    direction TB
+    I0[Resolve PR to base and head SHAs] --> I1[Dual checkout<br/>base and head worktrees]
+  end
 
-    CO --> TRI{Triager Gate<br/>static, ≤150ms<br/>skip formatting/rename/deps?}
-    TRI -- SKIP --> SKIP[Skip notice + Run anyway]
-    SKIP -. force .-> SCOUT
-    TRI -- PROCEED --> SCOUT
+  %% Scouting and spec
+  subgraph S2[Scouting & spec]
+    direction TB
+    S0[Scout<br/>entry point · reach set depth ≤2 · dependency ledger] --> D1[Delta Analyst<br/>LLM · thesis · knobs · observables · world genre]
+  end
 
-    SCOUT[1 · Scout · <br/>entry point, reach set depth≤2,<br/>dependency ledger] -- unscopable --> DEG
-    SCOUT --> DELTA[2 · Delta Analyst · LLM<br/>thesis, knobs, observables, world genre]
+  %% Verification loop
+  subgraph A[Verification loop · max 3 attempts]
+    direction TB
+    H1[Harness Engineer<br/>LLM + templates<br/>stubs · driver · run config · seed registry] --> V1[Fidelity Verifier]
+    V1 --> M{Symmetrist<br/>A/B byte-identical?}
+    M -- Fail --> H1
+    M -- Pass --> X{Differential test<br/>Sobol K=128 vs real code<br/>agreement ≥ 0.85?}
+    X -- Fail --> H1
+    X -- Pass --> A1[Assayer<br/>12 replicates · confidence score]
+  end
 
-    DELTA --> HE[3 · Harness Engineer · LLM+templates<br/>stubs + driver + run config,seed<br/>registry = fast path, else generate IR]
+  %% Adversary and world build
+  subgraph B[Adversary & world build]
+    direction TB
+    A2[Adversary<br/>128 evals · max divergence · cache every point] --> W1[World Director<br/>genre to stage + affordances]
+    W1 --> S3[Synthesizer<br/>switch on pack · enforce rendering fidelity]
+    S3 --> W([Playable microworld])
+  end
 
-    HE --> FV
-    subgraph LOOP_A[Loop A · max 3 attempts]
-        FV[4 · Fidelity Verifier ]
-        FV --> SYM{Symmetrist<br/>harness A/B byte-identical?}
-        SYM -- FAIL --> HE
-        SYM -- PASS --> DIFF{Differential test<br/>Sobol K=128 vs REAL code<br/>agreement ≥ 0.85?}
-        DIFF -- FAIL --> HE
-        DIFF -- PASS --> ASSAY[Assayer · 12 replicates<br/>confidence = agreement × stability × coverage]
-    end
+  %% Outcomes
+  GD([Graceful degradation<br/>specific reason · divergence samples · manual test recipe])
+  INERT([Behaviorally inert<br/>a finding, not a fake])
+  P[Play / inspect<br/>drag knobs · scrub timeline · click diff line<br/>pin-as-test · share permalink · trading card · duel]
 
-    ASSAY -- low band --> DEG
-    ASSAY -- verified --> ADV
+  %% Main flow
+  U --> I0
+  I1 --> G{Triager gate<br/>static ≤150ms<br/>skip formatting / rename / deps?}
+  G -- Skip --> N1[Skip notice<br/>run anyway]
+  N1 -. force .-> S0
+  G -- Proceed --> S0
+  S0 -- unscopable --> GD
+  D1 --> H1
+  A1 -- Low band --> GD
+  A1 -- Verified --> A2
+  A2 -- no divergence --> D1
+  A2 -- inert twice --> INERT
+  W --> P
 
-    subgraph LOOP_B[Loop B · max 1 kickback]
-        ADV[5 · Adversary · <br/>128 evals, max divergence,<br/>caches every point]
-    end
-    ADV -- no divergence --> DELTA
-    ADV -- inert twice --> INERT[Behaviorally inert · a finding, not a fake]
-    ADV --> WD[6 · World Director<br/>genre to stage + affordances]
+  %% Styling
+  classDef guard fill:#fff7ed,stroke:#d97706,stroke-width:2px,color:#7c2d12;
+  classDef nollm fill:#ecfdf5,stroke:#16a34a,stroke-width:2px,color:#14532d;
+  classDef llm fill:#eff6ff,stroke:#2563eb,stroke-width:2px,color:#1e3a8a;
+  classDef terminal fill:#fdf2f8,stroke:#db2777,stroke-width:2px,color:#831843;
+  classDef source fill:#f8fafc,stroke:#64748b,stroke-width:1.5px,color:#0f172a;
 
-    WD --> SYN[7 · Synthesizer · <br/>switch on pack, enforce Rendering Fidelity]
-    SYN --> WORLD([Playable microworld<br/>opens at the surprise])
+  class G,M,X guard;
+  class U,I0,I1,S0,V1,A1,A2,W1,S3,P source;
+  class D1,H1 llm;
+  class GD,INERT terminal;
+  class W nollm;
 
-    WORLD --> PLAY[Drag knobs · scrub timeline · click diff line<br/>Pin-as-test · Share permalink · Trading card · Duel]
-
-    DEG([Graceful Degradation+<br/>specific reason + divergence samples<br/>+ manual test recipe · NEVER a fake toy])
-
-    classDef guard fill:#fff3e0,stroke:#e07b00,color:#663300;
-    classDef nollm fill:#e8f5e9,stroke:#2e7d32,color:#1b3d1f;
-    classDef llm fill:#e3f2fd,stroke:#1565c0,color:#0d2c54;
-    classDef terminal fill:#fce4ec,stroke:#c2185b,color:#5a132e;
-    class TRI,SYM,DIFF guard;
-    class INTAKE,SCOUT,FV,ASSAY,ADV,SYN nollm;
-    class DELTA,HE llm;
-    class DEG,INERT terminal;
 ```
 
 **Reading the diagram:**
@@ -186,7 +203,7 @@ Walking one PR through the pipeline:
 
 ## 7 · The agents
 
-Lever started as **six agents** with deliberately opposed incentives. We added **two more** (Intake and World Director) and upgrades the Harness Engineer from registry‑lookup to generative construction - the change that makes "any PR" possible.
+LEVER started as **six agents** with deliberately opposed incentives. We added **two more** (Intake and World Director) and upgrades the Harness Engineer from registry‑lookup to generative construction - the change that makes "any PR" possible.
 
 | # | Agent |  One‑line role |
 |---|---|---|
@@ -201,8 +218,8 @@ Lever started as **six agents** with deliberately opposed incentives. We added *
 
 ### 0 · Intake
 - **What it does:** parses a GitHub PR URL to `(owner, repo, number)`, calls the GitHub REST API for base/head SHAs and the changed‑file list, then dual‑checks‑out both commits into worktrees and selects the primary Python pair.
-- **Why:** without it, Lever is a fixture player, not a product. This is the "paste a PR" capability.
-- **Advantage:** turns Lever from a four‑hero demo into something a judge can point at *their own* PR.
+- **Why:** without it, LEVER is a fixture player, not a product. This is the "paste a PR" capability.
+- **Advantage:** turns LEVER from a four‑hero demo into something a judge can point at *their own* PR.
 
 ### 1 · Scout 
 - **What it does:** tree‑sitter parse of both trees → import/call graph → reachable set (depth‑2 bounded) → entry‑point selection (outermost changed function callable with plain data) → dependency ledger with each dep classified.
@@ -217,11 +234,11 @@ Lever started as **six agents** with deliberately opposed incentives. We added *
 ### 3 · Harness Engineer 
 - **What it does:** makes both versions runnable in isolation. For known shapes it uses a registry template (fast, high confidence). For unknown shapes it **generates a Harness IR** (`domain/harness_ir.py`) - entry, imports, stubs, driver, knob bindings, extractors, seed policy - validated by a Pydantic schema and rendered to source deterministically. Stubs come from the versioned **Stub Library** (`domain/stubs/`), each emitting an uncertainty spec for the Assayer.
 - **Why:** the v2 hardcoded `ENTRY_POINT_REGISTRY` was a *gate* - any unknown function degraded immediately. v3 makes the registry an *accelerator*, not a gate.
-- **Advantage:** generality. Lever can harness plain‑data callables it has never seen. The IR (LLM proposes JSON, deterministic renderer emits code) is safer and easier to Symmetrist‑diff than free‑form code generation, and model code is only ever executed inside the E2B sandbox - never on the host.
+- **Advantage:** generality. LEVER can harness plain‑data callables it has never seen. The IR (LLM proposes JSON, deterministic renderer emits code) is safer and easier to Symmetrist‑diff than free‑form code generation, and model code is only ever executed inside the E2B sandbox - never on the host.
 
 ### 4 · Fidelity Verifier
 - **What it does:** hosts the trust layer - **Symmetrist** (fail‑fast, no execution), then the **differential test** (128 Sobol points against real code), then the **Assayer** (12 replicates for stability). Emits the `FidelityReport` with a measured confidence and band.
-- **Why:** this is *the* product. Without it, Lever is an LLM narrating what it thinks code does.
+- **Why:** this is *the* product. Without it, LEVER is an LLM narrating what it thinks code does.
 - **Advantage:** it is deliberately a **separate agent from the Harness Engineer, with the opposite objective** - the Engineer's job is to make code run; the Verifier's only reward is catching the Engineer cheating. Collapsing them would mean asking one prompt to critique itself.
 
 ### 5 · Adversary
@@ -274,7 +291,7 @@ confidence = agreement_rate × stability_factor × coverage_factor
 3. **Zoom is manual and explicitly labeled** - never automatic. *Auto‑scaling a 3% gap to fill the chart is the same class of lie as an asymmetric harness, one layer up the stack - and it would pass the other three guardrails because none of them look at the chart.*
 
 ### Graceful Degradation+ *(the exit that makes the rest believable)*
-When Scout can't scope, the harness can't be built after 3 attempts, agreement stays < 0.85, confidence is low, or there's no executable reference - Lever renders a **specific** `degradeReason` (named dependency, attempt count, failure mode), a **[Show me →]** divergence report, a plain explanation, and a **manual test recipe** (1–3 concrete inputs to try). **No toy is ever rendered.** *A tool that sometimes fabricates is worse than no tool, because it manufactures the exact false confidence Lever exists to cure. The 5% where it says "I don't know" is what makes the 95% believable.*
+When Scout can't scope, the harness can't be built after 3 attempts, agreement stays < 0.85, confidence is low, or there's no executable reference - LEVER renders a **specific** `degradeReason` (named dependency, attempt count, failure mode), a **[Show me →]** divergence report, a plain explanation, and a **manual test recipe** (1–3 concrete inputs to try). **No toy is ever rendered.** *A tool that sometimes fabricates is worse than no tool, because it manufactures the exact false confidence LEVER exists to cure. The 5% where it says "I don't know" is what makes the 95% believable.*
 
 ## 9 · Feature inventory
 
@@ -348,27 +365,27 @@ Delta Analyst selects a **domain pack** (visual grammar); the World Director map
 
 ## 12 · Measured results
 
-Lever tracks, on every run, which terminal outcome each change reaches: **verified (high/medium) · inert · unscopable · unharnessable · unverifiable**. Credibility over bluff - the honest number goes here.
+LEVER tracks, on every run, which terminal outcome each change reaches: **verified (high/medium) · inert · unscopable · unharnessable · unverifiable**. Credibility over bluff - the honest number goes here.
 
 **Reproduce:**
 ```bash
-cd lever && source .venv/bin/activate
+cd LEVER && source .venv/bin/activate
 python scripts/run_wild_corpus.py     # prints a per‑fixture outcome table + hit rate
 ```
 
 **Last measured (unit‑corpus path):** `hit_rate_verified_or_honest = 1.0` across the Wild Three - **W1** verified through the generative Harness IR, **W2** verified as a hero fixture + genre, **W3** correctly routed to Degradation+. That metric is deliberately defined as *"reached a verified microworld **or** an honest degradation"* - i.e. **it never produced a silent fake** on the corpus.
 
-**Honest framing for arbitrary PRs.** Lever targets **behavioral Python PRs with a plain‑data callable core**. It will *not* verify a change whose only modified functions require a live `db`/session/request object, or a change that is purely additive (no old behavior to diff against) - those degrade **by design**. This is the D(x)/framework‑boundary limit (see §16), and the degradation is a feature, not a crash. The raw verified‑fraction on arbitrary public PRs is bounded by that constraint; the value Lever guarantees is that **it is never wrong about what it verified**.
+**Honest framing for arbitrary PRs.** LEVER targets **behavioral Python PRs with a plain‑data callable core**. It will *not* verify a change whose only modified functions require a live `db`/session/request object, or a change that is purely additive (no old behavior to diff against) - those degrade **by design**. This is the D(x)/framework‑boundary limit (see §16), and the degradation is a feature, not a crash. The raw verified‑fraction on arbitrary public PRs is bounded by that constraint; the value LEVER guarantees is that **it is never wrong about what it verified**.
 
 ### Automated test suite
 
-Lever ships **168 automated tests - all green** (130 backend + 38 frontend). The trust‑critical pieces are unit‑tested deterministically, so the guarantees hold in the *live* path, not just in prose. Judges can reproduce every number below in under two minutes.
+LEVER ships **168 automated tests - all green** (130 backend + 38 frontend). The trust‑critical pieces are unit‑tested deterministically, so the guarantees hold in the *live* path, not just in prose. Judges can reproduce every number below in under two minutes.
 
 **Backend - pytest**
 
 | Metric | Value |
 |---|---|
-| Test files | **39** (32 for Lever's own agents/guardrails/API + 7 hero fixture reference suites) |
+| Test files | **39** (32 for LEVER's own agents/guardrails/API + 7 hero fixture reference suites) |
 | Tests collected | **130** |
 | Result | **129 passed · 1 skipped** (~59s) |
 | The 1 skip | a *live* E2B sandbox integration test, skipped on the offline unit path (runs only with `E2B_API_KEY` + network) |
@@ -446,7 +463,7 @@ cd frontend && npm test
 
 ## 15 · Built with Codex
 
-Lever was built during the OpenAI Build Week using **OpenAI Codex and GPT‑5.6** as an active engineering collaborator throughout, against a spec‑first workflow.
+LEVER was built during the OpenAI Build Week using **OpenAI Codex and GPT‑5.6** as an active engineering collaborator throughout, against a spec‑first workflow.
 
 **Where Codex accelerated the work:**
 - **Scaffolding the eight‑agent pipeline** - Codex generated the initial `domain/` modules (Scout, Delta Analyst, Harness Engineer, Fidelity Verifier, Adversary, Synthesizer) against the locked `InteractionSpec` schema, then Intake and World Director for v3.
@@ -470,8 +487,8 @@ Evidence of in‑window Codex/GPT‑5.6 use is in the dated git history and the 
 
 The house style is honest confidence over silent overreach. A stated blind spot is cheaper credibility than a hidden one.
 
-- **D(x) blindness - Lever measures what code returns, not how it got there.** A refactor that produces identical outputs by a different route reports as *behaviorally inert*, even if something structurally significant changed (e.g. a new dependency on a permission service). The `decision-tree` pack's path‑divergence objective partially mitigates this for that pack only; the general limit stands.
-- **Framework/DB‑coupled changes degrade by design.** If the only changed functions need a live `db`/session/request object, Lever refuses rather than faking one. (Ephemeral seeded backends and framework test‑client harnesses are the planned, unimplemented.)
+- **D(x) blindness - LEVER measures what code returns, not how it got there.** A refactor that produces identical outputs by a different route reports as *behaviorally inert*, even if something structurally significant changed (e.g. a new dependency on a permission service). The `decision-tree` pack's path‑divergence objective partially mitigates this for that pack only; the general limit stands.
+- **Framework/DB‑coupled changes degrade by design.** If the only changed functions need a live `db`/session/request object, LEVER refuses rather than faking one. (Ephemeral seeded backends and framework test‑client harnesses are the planned, unimplemented.)
 - **Purely additive PRs have nothing to diff.** Differential testing needs a function present in *both* base and head; brand‑new functions have no "old" behavior to compare against.
 - **Reach depth 2.** Second‑order effects beyond two hops are invisible; blast‑radius detection is excluded on soundness grounds (static analysis can't see dynamic dispatch/reflection/event buses).
 - **No executable reference → no verification.** A repo with no runnable reference path routes to degradation.
@@ -479,9 +496,15 @@ The house style is honest confidence over silent overreach. A stated blind spot 
 
 ---
 
-### Further reading
+## 19 · License
+
+Released under the **MIT License** - see [`LICENSE`](LICENSE). Per the hackathon rules the repository is **public with a license**; if kept private instead, share it with `testing@devpost.com` and `build-week-event@openai.com`.
+
+---
+
+<!-- ### Further reading
 - [`docs/SPEC.md`](docs/SPEC.md) - the v2 trust bible (Symmetrist, Assayer, packs, agent contracts)
 - [`docs/SPEC_V3.md`](docs/SPEC_V3.md) - the v3 win spec (PR intake, generative harness, world genres)
 - [`docs/BUILD_PLAN_V3.md`](docs/BUILD_PLAN_V3.md) - phased build order (A–H)
 - [`docs/WILD_CORPUS.md`](docs/WILD_CORPUS.md) - the Wild Three honesty corpus
-- [`docs/BUILD_PLAN_PHASE_G.md`](docs/BUILD_PLAN_PHASE_G.md) - planned framework/DB support (not implemented)
+- [`docs/BUILD_PLAN_PHASE_G.md`](docs/BUILD_PLAN_PHASE_G.md) - planned framework/DB support (not implemented) -->
