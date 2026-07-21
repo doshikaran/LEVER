@@ -130,6 +130,38 @@ function isDegradationEvent(event: { type?: unknown }): event is DegradationEven
   return ['skipped', 'unscopable', 'inert', 'degraded'].includes(String(event.type))
 }
 
+type EvaluationDispatchResult =
+  | Readonly<{ kind: 'cache-hit'; observations: ObservationBundle }>
+  | Readonly<{ kind: 'not-ready' }>
+  | Readonly<{ kind: 'sent' }>
+
+/**
+ * Shared cache-check-then-send path used by both evaluatePosition (drag-driven,
+ * updates the single "current position" chart, cancellable via positionVersion)
+ * and evaluateOnePosition (one grid cell, resolved independently via
+ * pendingGridResolvers). Looks up the shared Zustand cache by the
+ * already-hashed key; on a miss with an open socket, generates a requestId,
+ * calls `registerPending(requestId)` so the caller can record its own
+ * bookkeeping *before* the WS message is sent (preserving each call site's
+ * original ordering), then sends the request. Callers keep their own distinct
+ * state-update / promise-resolution semantics on the returned result — this
+ * only unifies the request-sending path they had in common.
+ */
+function dispatchEvaluationRequest(
+  socketRef: WebSocket | null,
+  key: string,
+  position: KnobPosition,
+  registerPending: (requestId: string) => void,
+): EvaluationDispatchResult {
+  const cacheHit = useMicroworldStore.getState().cache.get(key)
+  if (cacheHit) return { kind: 'cache-hit', observations: cacheHit }
+  if (socketRef?.readyState !== WebSocket.OPEN) return { kind: 'not-ready' }
+  const requestId = crypto.randomUUID()
+  registerPending(requestId)
+  socketRef.send(JSON.stringify({ type: 'evaluate', requestId, position }))
+  return { kind: 'sent' }
+}
+
 function App() {
   const [selectedHeroId, setSelectedHeroId] = useState(HEROES[0].id)
   const selectedHero = HEROES.find((hero) => hero.id === selectedHeroId) ?? HEROES[0]
@@ -157,7 +189,9 @@ function App() {
   const [prospectivePending, setProspectivePending] = useState(false)
   const socket = useRef<WebSocket | null>(null)
   const pendingRequests = useRef(new Map<string, PendingRequest>())
-  const pendingGridResolvers = useRef(new Map<string, (observations: ObservationBundle | null) => void>())
+  const pendingGridResolvers = useRef(
+    new Map<string, Readonly<{ resolve: (observations: ObservationBundle | null) => void; reject: (error: Error) => void }>>(),
+  )
   const positionVersion = useRef(0)
   const dragSettleTimer = useRef<number | undefined>(undefined)
   const selectedTracePosition = useRef<KnobPosition | null>(null)
@@ -172,23 +206,20 @@ function App() {
     const key = await hashPosition(nextPosition)
     if (version !== positionVersion.current) return
 
-    const cacheHit = useMicroworldStore.getState().cache.get(key)
-    if (cacheHit) {
-      setObservations(cacheHit)
+    const result = dispatchEvaluationRequest(socket.current, key, nextPosition, (requestId) => {
+      pendingRequests.current.set(requestId, { key, version, position: { ...nextPosition } })
+      setLoadingKey(key)
+    })
+    if (result.kind === 'cache-hit') {
+      setObservations(result.observations)
       setObservedPosition({ ...nextPosition })
       setEvaluationSource('cache')
       setLoadingKey(null)
       return
     }
-
-    if (socket.current?.readyState !== WebSocket.OPEN) {
+    if (result.kind === 'not-ready') {
       setError('The evaluation connection is not ready.')
-      return
     }
-    const requestId = crypto.randomUUID()
-    pendingRequests.current.set(requestId, { key, version, position: { ...nextPosition } })
-    setLoadingKey(key)
-    socket.current.send(JSON.stringify({ type: 'evaluate', requestId, position: nextPosition }))
   }, [])
 
   // A permission-grid cell's evaluation must not disturb the single "current
@@ -198,14 +229,18 @@ function App() {
   // and cache (so cache hits are shared) but resolves via its own map instead.
   const evaluateOnePosition = useCallback(async (nextPosition: KnobPosition): Promise<ObservationBundle | null> => {
     const key = await hashPosition(nextPosition)
-    const cacheHit = useMicroworldStore.getState().cache.get(key)
-    if (cacheHit) return cacheHit
-
-    if (socket.current?.readyState !== WebSocket.OPEN) return null
-    const requestId = crypto.randomUUID()
-    return new Promise<ObservationBundle | null>((resolve) => {
-      pendingGridResolvers.current.set(requestId, resolve)
-      socket.current!.send(JSON.stringify({ type: 'evaluate', requestId, position: nextPosition }))
+    return new Promise<ObservationBundle | null>((resolve, reject) => {
+      const result = dispatchEvaluationRequest(socket.current, key, nextPosition, (requestId) => {
+        pendingGridResolvers.current.set(requestId, { resolve, reject })
+      })
+      if (result.kind === 'cache-hit') {
+        resolve(result.observations)
+      } else if (result.kind === 'not-ready') {
+        resolve(null)
+      }
+      // 'sent': the resolver was already registered above; connectToChange's
+      // onmessage handler resolves/rejects it when a reply (or a hero switch
+      // that closes this socket) arrives.
     })
   }, [])
 
@@ -223,7 +258,22 @@ function App() {
     return result
   }, [evaluateOnePosition])
 
+  // Grid-cell fetches are awaited via Promise.all in evaluateManyPositions. If
+  // the socket that would have delivered their reply closes first (hero
+  // switch, unmount, or reconnecting to a new change), any resolver left in
+  // this map would otherwise never settle — hanging that Promise.all forever
+  // with no visible error. Reject them all instead so callers observe a clear
+  // failure.
+  const rejectPendingGridResolvers = useCallback((message: string) => {
+    if (pendingGridResolvers.current.size === 0) return
+    for (const { reject } of pendingGridResolvers.current.values()) {
+      reject(new Error(message))
+    }
+    pendingGridResolvers.current.clear()
+  }, [])
+
   const connectToChange = useCallback((nextChangeId: string) => {
+    rejectPendingGridResolvers('The evaluation connection was replaced before this position could be evaluated.')
     socket.current?.close()
     const nextSocket = new WebSocket(`${socketBase(API_BASE)}/ws/${nextChangeId}`)
     socket.current = nextSocket
@@ -284,7 +334,7 @@ function App() {
         if (gridResolver) {
           pendingGridResolvers.current.delete(evaluation.requestId)
           putCachedObservation(evaluation.positionKey, evaluation.observations)
-          gridResolver(evaluation.observations)
+          gridResolver.resolve(evaluation.observations)
           return
         }
         const pending = pendingRequests.current.get(evaluation.requestId)
@@ -305,7 +355,7 @@ function App() {
         const gridResolver = pendingGridResolvers.current.get(failed.requestId ?? '')
         if (gridResolver) {
           pendingGridResolvers.current.delete(failed.requestId ?? '')
-          gridResolver(null)
+          gridResolver.resolve(null)
           return
         }
         pendingRequests.current.delete(failed.requestId ?? '')
@@ -348,7 +398,7 @@ function App() {
       setProspectivePending(false)
       setError('The WebSocket connection failed.')
     }
-  }, [putCachedObservation, replaceCache, replacePosition])
+  }, [putCachedObservation, replaceCache, replacePosition, rejectPendingGridResolvers])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -397,9 +447,10 @@ function App() {
     return () => {
       disposed = true
       controller.abort()
+      rejectPendingGridResolvers('Hero changed before this position could be evaluated')
       socket.current?.close()
     }
-  }, [connectToChange, selectedHeroId, selectedHero, replaceCache, replacePosition])
+  }, [connectToChange, selectedHeroId, selectedHero, replaceCache, replacePosition, rejectPendingGridResolvers])
 
   useEffect(() => {
     if (widget === null || degradation !== null || Object.keys(position).length === 0) return

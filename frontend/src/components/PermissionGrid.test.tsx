@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { PermissionGrid } from './PermissionGrid'
 import type { ControlDescriptor, KnobPosition, ObservationBundle } from '../types'
 
@@ -13,6 +13,10 @@ function bundle(base: boolean, head: boolean): ObservationBundle {
 }
 
 describe('PermissionGrid', () => {
+  afterEach(() => {
+    cleanup()
+  })
+
   it('requests every axis combination once and renders one cell per pair', async () => {
     const onCellsNeeded = vi.fn(async (positions: readonly KnobPosition[]) => {
       const result: Record<string, ObservationBundle> = {}
@@ -39,5 +43,28 @@ describe('PermissionGrid', () => {
     expect(await screen.findAllByRole('gridcell')).toHaveLength(4)
     const flipped = screen.getByRole('gridcell', { name: /contractor.*audit-log/i })
     expect(flipped.getAttribute('data-flipped')).toBe('true')
+  })
+
+  it('surfaces a visible error instead of hanging silently when onCellsNeeded rejects', async () => {
+    const onCellsNeeded = vi.fn(
+      async () => Promise.reject(new Error('Hero changed before this position could be evaluated')),
+    )
+
+    render(
+      <PermissionGrid
+        controls={controls}
+        observableId="allow"
+        basePosition={{ role: 'viewer', resource: 'doc' }}
+        onCellsNeeded={onCellsNeeded}
+      />,
+    )
+
+    await waitFor(() => expect(screen.getByRole('grid').getAttribute('data-error')).toBe('true'))
+    // Cells stay on their pending placeholder — the fix does not invent fake
+    // data, it only makes the failure observable rather than indistinguishable
+    // from "still loading".
+    for (const cell of screen.getAllByRole('gridcell')) {
+      expect(cell.textContent).toBe('…')
+    }
   })
 })

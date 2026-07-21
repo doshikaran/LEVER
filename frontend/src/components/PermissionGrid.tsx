@@ -17,6 +17,11 @@ export function PermissionGrid({ controls, observableId, basePosition, onCellsNe
   const xControl = controls.find((control) => control.axisRole === 'x')
   const yControl = controls.find((control) => control.axisRole === 'y')
   const [cells, setCells] = useState<Record<string, ObservationBundle>>({})
+  // Set when onCellsNeeded rejects (e.g. the user switched heroes before this
+  // grid's outstanding requests could resolve). Cells simply keep showing
+  // their existing state ('…' if nothing arrived yet) — this only makes the
+  // failure observable instead of silently indistinguishable from "loading".
+  const [fetchFailed, setFetchFailed] = useState(false)
 
   useEffect(() => {
     if (!xControl || !yControl || !isEnumDomain(xControl.domain) || !isEnumDomain(yControl.domain)) return
@@ -27,9 +32,14 @@ export function PermissionGrid({ controls, observableId, basePosition, onCellsNe
       }
     }
     let cancelled = false
-    onCellsNeeded(positions).then((result) => {
-      if (!cancelled) setCells(result)
-    })
+    setFetchFailed(false)
+    onCellsNeeded(positions)
+      .then((result) => {
+        if (!cancelled) setCells(result)
+      })
+      .catch(() => {
+        if (!cancelled) setFetchFailed(true)
+      })
     return () => {
       cancelled = true
     }
@@ -49,7 +59,10 @@ export function PermissionGrid({ controls, observableId, basePosition, onCellsNe
   const yId = yControl.id
 
   return (
-    <table role="grid" aria-label="Permission matrix" className="border-collapse">
+    <table role="grid" aria-label="Permission matrix" className="border-collapse" data-error={fetchFailed}>
+      <caption className="sr-only">
+        {fetchFailed ? 'Some permission cells could not be evaluated before this hero changed.' : 'Permission matrix'}
+      </caption>
       <thead>
         <tr>
           <th />
