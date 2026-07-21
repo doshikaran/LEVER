@@ -72,7 +72,7 @@ function StageBody({
     return (
       <ArenaStage
         widget={widget}
-        counts={{ base: baseValue, head: headValue, divergence }}
+        counts={{ base: Number(baseValue), head: Number(headValue), divergence }}
         unit={widget.charts[0]?.unit ?? null}
         onSurpriseClick={onPointClick}
       />
@@ -82,8 +82,8 @@ function StageBody({
     return (
       <PermissionMatrix
         widget={widget}
-        baseValue={baseValue}
-        headValue={headValue}
+        baseValue={Number(baseValue)}
+        headValue={Number(headValue)}
         divergence={divergence}
         onCellActivate={onPointClick}
       />

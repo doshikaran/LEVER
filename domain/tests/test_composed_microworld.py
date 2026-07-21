@@ -123,7 +123,10 @@ def test_hero1_composition_generates_and_executes_all_four_harnesses_locally() -
     )
     runtime.kill_sandbox(sandbox_id)
 
-    assert len(runtime.run_calls) == 4
+    # Four MODULE_PATH stages + four corner executions (E2B needs the stages).
+    assert len(runtime.run_calls) == 8
+    assert sum(1 for _, code in runtime.run_calls if "target.write_text" in code) == 4
+    assert sum(1 for _, code in runtime.run_calls if "print(json.dumps(run(" in code) == 4
     assert {name: payload["observations"]["admitted"] for name, payload in evaluated.observations.items()} == {
         "base": 5,
         "A": 10,

@@ -89,6 +89,7 @@ describe('App degradation routing', () => {
     cleanup()
     vi.unstubAllGlobals()
     useMicroworldStore.setState({ position: {}, cache: new Map() })
+    window.history.replaceState({}, '', '/')
   })
 
   it.each(terminals)('$fixture: chartCount=0, controlCount=0', async (terminal) => {

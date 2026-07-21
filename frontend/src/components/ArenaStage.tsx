@@ -76,7 +76,12 @@ export function ArenaStage({ widget, counts, unit, onSurpriseClick }: ArenaStage
     <section
       data-testid="arena-stage"
       aria-label="Throughput arena"
-      className="relative overflow-hidden rounded-xl border border-[var(--lever-text)]/20 bg-[radial-gradient(circle_at_20%_20%,#1a2430,transparent_55%),radial-gradient(circle_at_80%_0%,#2a1a1a,transparent_50%),#0f1419] p-4 text-[#f4efe6] shadow-sm"
+      className="relative overflow-hidden rounded-xl border border-[var(--lever-text)]/20 p-4 text-[#f4efe6] shadow-sm"
+      style={{
+        backgroundColor: '#0f1419',
+        backgroundImage:
+          'radial-gradient(circle at 20% 20%, #1a2430, transparent 55%), radial-gradient(circle at 80% 0%, #2a1a1a, transparent 50%)',
+      }}
     >
       <header className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div>

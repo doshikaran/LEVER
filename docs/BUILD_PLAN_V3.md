@@ -284,6 +284,76 @@ Another person can run the demo from README cold.
 
 ---
 
+## Phase H — Interaction & shareability (differentiators)
+
+> These lean on Lever's unique asset: a **measured cache of real old-vs-new
+> executions with per-frame source traces**. None require new model calls; they
+> are pure product surfaces on top of data the pipeline already produces. Trust
+> invariant preserved: nothing is shown that wasn't actually executed.
+
+### H1. Time-travel code review
+Scrub the timeline and watch the **diff highlight morph**: on each frame, the
+lines that the current input *actually executed* light up (base lines from
+`trace.base.executedLines`, head lines from `trace.head.executedLines`); the
+version-exclusive `responsibleLine` gets a stronger rail marker.
+
+**Build**
+- `CodeDiff` accepts `baseExecutedLines`, `headExecutedLines`, `responsibleLine`.
+- `App` derives them from the current frame's `observations.trace` and passes them in.
+
+**Done when** stepping frames changes which diff rows glow; unexecuted rows dim.
+
+### H2. Diff-as-controller
+Click a red/green (or context) diff line → Lever jumps to the **first measured
+frame that executes that line**. The diff becomes a joystick into the microworld.
+
+**Build**
+- `CodeDiff` rows become buttons emitting `onLineClick(version, lineNo)`.
+- `App.jumpToLineFrame` scans `steps` (measured cache) for the earliest frame whose
+  `trace[version].executedLines` contains the line; `seekStep` to it, else a toast.
+
+**Done when** clicking `w = self.windows[tenant_id]` seeks to a frame that ran it.
+
+### H3. "Break the PR" challenge mode
+A toggle that hides the surprise and dares the user to find a diverging input
+before Lever reveals it. Lever already has the answer; you race it.
+
+**Build**
+- `ChallengePanel` tracks the user's **best divergence found** while they scrub /
+  turn knobs, compared to `widget.surpriseMarker.divergence`.
+- While active: suppress surprise tick + auto-jump. "Reveal" ends it and seeks to
+  the surprise. Win state when user meets/beats Lever's max divergence.
+
+**Done when** a user can play, see a live "You 12% · Lever 60%" scoreboard, and win.
+
+### H4. Microworld trading card
+One-click shareable **card**: thesis, domain pack, confidence band + %, the
+surprise input and its caption, fork/observable — exported as a **PNG** (drawn on
+a canvas, dependency-free) plus a "copy permalink" button. A social artifact.
+
+**Build**
+- `TradingCard` modal; `drawCard(canvas)` paints gradient + stats; `toBlob` download.
+- Reuses `changeId` permalink for the copy-link action.
+
+**Done when** any verified session exports a legible PNG and copies its link.
+
+### H5. Receipt duel / twin microworld
+Compare two analyzed changes on the **same subsystem** side by side with one
+synced scrubber and a head-to-head risk verdict ("A diverges 2.1×, B 1.3× → A is
+riskier under the same load"). Every displayed corner is a real cached execution.
+
+**Build**
+- Duel view loads two persisted payloads (`GET /diffs/:id`) chosen from the Session
+  Ledger; renders two read-only outcome stages fed by explicit cached values (not
+  the global interactive store), a shared index scrubber, and a comparison banner.
+
+**Done when** two sessions can be dueled from the ledger with a synced timeline.
+
+**Non-goals for H:** no new LLM calls; no cross-language; duel stays read-only
+(no live re-evaluation of two independent interactive stores).
+
+---
+
 ## Workstream ownership (if splitting)
 
 | Owner focus | Phases |

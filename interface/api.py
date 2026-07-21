@@ -1652,9 +1652,30 @@ def _hero1_composed_payload(runtime: SandboxRuntime) -> dict[str, Any]:
     )
 
     fixture_dir = _PROJECT_ROOT / "fixtures" / "hero1"
+    # Stage under /tmp so E2B can mkdir the tree (host /Users/... paths fail remotely).
+    sandbox_modules = Path("/tmp/lever-compose-hero1")
+    sandbox_modules.mkdir(parents=True, exist_ok=True)
+    modules = {
+        "base.py": (fixture_dir / "base.py").read_text(encoding="utf-8"),
+        "a.py": (fixture_dir / "head.py").read_text(encoding="utf-8"),
+        "b.py": (fixture_dir / "limit_head.py").read_text(encoding="utf-8"),
+        "ab.py": (fixture_dir / "combined.py").read_text(encoding="utf-8"),
+    }
+    for name, source in modules.items():
+        (sandbox_modules / name).write_text(source, encoding="utf-8")
+    checkout = CompositionCheckout(
+        base_module_path=str(sandbox_modules / "base.py"),
+        a_module_path=str(sandbox_modules / "a.py"),
+        b_module_path=str(sandbox_modules / "b.py"),
+        ab_module_path=str(sandbox_modules / "ab.py"),
+        base_source=modules["base.py"],
+        a_source=modules["a.py"],
+        b_source=modules["b.py"],
+        ab_source=modules["ab.py"],
+    )
     scope = ScopedChangeSet(
         entry_point=EntryPoint(
-            file=str(fixture_dir / "head.py"),
+            file=str(sandbox_modules / "a.py"),
             fn="RateLimiter.admit",
             signature="RateLimiter.admit(self, tenant_id: str, now: float) -> bool",
         ),
@@ -1724,14 +1745,10 @@ def _hero1_composed_payload(runtime: SandboxRuntime) -> dict[str, Any]:
             )
         ],
     )
-    checkout = CompositionCheckout(
-        base_module_path=str(fixture_dir / "base.py"),
-        a_module_path=str(fixture_dir / "head.py"),
-        b_module_path=str(fixture_dir / "limit_head.py"),
-        ab_module_path=str(fixture_dir / "combined.py"),
-    )
     harnesses = build_composed_harnesses(scope, spec, checkout)
-    sandbox_id = runtime.create_sandbox("compose-hero1")
+    # Use the same host-matched template as the main pipeline. A bespoke
+    # "compose-hero1" E2B template is not published; inventing one 404s.
+    sandbox_id = runtime.create_sandbox(os.getenv("LEVER_SANDBOX_TEMPLATE", "base"))
     try:
         point = KnobPosition({"limit_per_sec": 5, "burst": 0, "rps": 6, "tenants": 2})
         evaluated = evaluate_composed_position(

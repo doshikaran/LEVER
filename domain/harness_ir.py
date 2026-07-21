@@ -79,8 +79,14 @@ def build_harness_ir(
         raise ValueError(plan.unharnessable_reason or "Change is unharnessable")
 
     knobs = {knob.id: knob for knob in partial_spec.knobs}
-    invocation = _invocation_from_entry_and_knobs(entry.fn, partial_spec.knobs)
     driver = _driver_from_knobs(partial_spec.knobs)
+    consumed_ids = {driver.countKnobId, driver.repeatKnobId} - {None}
+    invocation = _invocation_from_entry_and_knobs(
+        entry.fn,
+        partial_spec.knobs,
+        signature=entry.signature,
+        consumed_ids=consumed_ids,
+    )
     observation_mode: Literal["return_value", "call_count"] = (
         "call_count" if driver.kind == "counted_calls" else "return_value"
     )
@@ -186,19 +192,49 @@ def _validate_ir(ir: HarnessIR, knobs: dict[str, Knob], observables: list[Observ
         raise ValueError(f"Harness IR references unknown knobs: {missing}")
 
 
-def _invocation_from_entry_and_knobs(entry_fn: str, knobs: list[Knob]) -> Invocation:
-    """Map ParamBindings onto a direct call or construct-then-call shape."""
+def _method_param_names(signature: str | None) -> set[str]:
+    """Caller-supplied parameter names from a signature, minus ``self``/``cls``."""
+    if not signature:
+        return set()
+    open_paren = signature.find("(")
+    close_paren = signature.rfind(")")
+    if open_paren == -1 or close_paren <= open_paren:
+        return set()
+    names: set[str] = set()
+    for parameter in signature[open_paren + 1 : close_paren].split(","):
+        name = parameter.strip().lstrip("*").split(":", 1)[0].split("=", 1)[0].strip()
+        if name and name not in {"self", "cls"}:
+            names.add(name)
+    return names
+
+
+def _invocation_from_entry_and_knobs(
+    entry_fn: str,
+    knobs: list[Knob],
+    *,
+    signature: str | None = None,
+    consumed_ids: set[str] | frozenset[str] = frozenset(),
+) -> Invocation:
+    """Map ParamBindings onto a direct call or construct-then-call shape.
+
+    Driver-bound knobs that a counted-calls loop does *not* consume as a numeric
+    count are categorical inputs (e.g. a state-machine ``start``/``event``). They
+    must still be passed to the target, routed to the constructor or the method by
+    matching the driver's ``param`` name against the method signature — otherwise a
+    generic loop would try ``int('draft')`` and the whole change degrades.
+    """
     parts = [part for part in entry_fn.split(".") if part]
     argument_knobs = [knob for knob in knobs if isinstance(knob.binding, ArgumentBinding)]
     config_knobs = [knob for knob in knobs if isinstance(knob.binding, ConfigBinding)]
+    value_driver_knobs = [
+        knob
+        for knob in knobs
+        if isinstance(knob.binding, DriverBinding) and knob.id not in consumed_ids
+    ]
+    method_params = _method_param_names(signature)
 
-    # ``Class.method`` — construct then call. Bare ``function`` — direct call.
-    if len(parts) >= 2 and parts[-1][:1].islower() and parts[-2][:1].isupper():
-        constructor_args = [
-            InvocationArg(knobId=knob.id, asKeyword=_keyword_for_config(knob))
-            for knob in config_knobs
-        ]
-        call_args = [
+    def _sorted_arguments() -> list[InvocationArg]:
+        return [
             InvocationArg(knobId=knob.id)
             for knob in sorted(
                 argument_knobs,
@@ -207,6 +243,21 @@ def _invocation_from_entry_and_knobs(entry_fn: str, knobs: list[Knob]) -> Invoca
                 else 0,
             )
         ]
+
+    # ``Class.method`` — construct then call. Bare ``function`` — direct call.
+    if len(parts) >= 2 and parts[-1][:1].islower() and parts[-2][:1].isupper():
+        constructor_args = [
+            InvocationArg(knobId=knob.id, asKeyword=_keyword_for_config(knob))
+            for knob in config_knobs
+        ]
+        call_args = _sorted_arguments()
+        for knob in value_driver_knobs:
+            assert isinstance(knob.binding, DriverBinding)
+            arg = InvocationArg(knobId=knob.id, asKeyword=knob.binding.param)
+            if knob.binding.param in method_params or not method_params:
+                call_args.append(arg)
+            else:
+                constructor_args.append(arg)
         if not call_args and not constructor_args:
             call_args = [
                 InvocationArg(knobId=knob.id)
@@ -220,16 +271,12 @@ def _invocation_from_entry_and_knobs(entry_fn: str, knobs: list[Knob]) -> Invoca
             callArgs=call_args,
         )
 
-    args: list[InvocationArg] = []
-    for knob in sorted(
-        argument_knobs,
-        key=lambda item: item.binding.argIndex
-        if isinstance(item.binding, ArgumentBinding)
-        else 0,
-    ):
-        args.append(InvocationArg(knobId=knob.id))
+    args: list[InvocationArg] = _sorted_arguments()
     for knob in config_knobs:
         args.append(InvocationArg(knobId=knob.id, asKeyword=_keyword_for_config(knob)))
+    for knob in value_driver_knobs:
+        assert isinstance(knob.binding, DriverBinding)
+        args.append(InvocationArg(knobId=knob.id, asKeyword=knob.binding.param))
     if not args:
         args = [
             InvocationArg(knobId=knob.id)
@@ -246,22 +293,29 @@ def _keyword_for_config(knob: Knob) -> str:
 
 
 def _driver_from_knobs(knobs: list[Knob]) -> DriverLoop:
-    drivers = [knob for knob in knobs if isinstance(knob.binding, DriverBinding)]
-    if not drivers:
+    # Only a numeric driver knob can be a synthetic call *count*. A categorical
+    # driver knob (enum/boolean) is a value input — e.g. a state-machine event —
+    # and is bound as an argument by ``_invocation_from_entry_and_knobs`` instead.
+    numeric_drivers = [
+        knob
+        for knob in knobs
+        if isinstance(knob.binding, DriverBinding) and knob.type in {"scalar", "integer"}
+    ]
+    if not numeric_drivers:
         return DriverLoop(kind="none")
     primary = next(
         (
             knob
-            for knob in drivers
+            for knob in numeric_drivers
             if (
                 isinstance(knob.binding, DriverBinding)
                 and knob.binding.param in {"rps", "clients", "n", "requests"}
             )
             or knob.id in {"rps", "clients", "n", "requests"}
         ),
-        drivers[0],
+        numeric_drivers[0],
     )
-    secondary = next((knob for knob in drivers if knob.id != primary.id), None)
+    secondary = next((knob for knob in numeric_drivers if knob.id != primary.id), None)
     return DriverLoop(
         kind="counted_calls",
         countKnobId=primary.id,

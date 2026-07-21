@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { MicroworldCanvas } from './components/MicroworldCanvas'
+import { CodeDiff } from './components/CodeDiff'
+import { GenreSimulation } from './components/GenreSimulation'
+import { TimelineScrubber } from './components/TimelineScrubber'
 import { KnobPanel } from './components/KnobPanel'
 import { DegradationPanel } from './components/DegradationPanel'
 import { SourceViewer } from './components/SourceViewer'
@@ -10,6 +13,9 @@ import { PrIntake, type DemoInfo } from './components/PrIntake'
 import { SessionLedger, type SessionRow } from './components/SessionLedger'
 import { ReceiptPanel } from './components/ReceiptPanel'
 import { ComposedMicroworld } from './components/ComposedMicroworld'
+import { ChallengePanel } from './components/ChallengePanel'
+import { TradingCard } from './components/TradingCard'
+import { ReceiptDuel, type DuelFrame, type DuelSide } from './components/ReceiptDuel'
 import { useMicroworldStore } from './store/useMicroworldStore'
 import type {
   CompleteEvent,
@@ -108,9 +114,71 @@ async function hashPosition(position: KnobPosition) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+function asBranchDecisions(value: unknown): { tag: string; outcome: boolean }[] | null {
+  if (!Array.isArray(value)) return null
+  const out: { tag: string; outcome: boolean }[] = []
+  for (const entry of value) {
+    if (
+      entry !== null
+      && typeof entry === 'object'
+      && typeof (entry as { tag?: unknown }).tag === 'string'
+      && typeof (entry as { outcome?: unknown }).outcome === 'boolean'
+    ) {
+      out.push({ tag: (entry as { tag: string }).tag, outcome: (entry as { outcome: boolean }).outcome })
+    }
+  }
+  return out
+}
+
+function pathFingerprint(path: readonly { tag: string; outcome: boolean }[]) {
+  return path.map((step) => `${step.tag}:${step.outcome ? 'T' : 'F'}`).join(' → ')
+}
+
+function pathHamming(base: readonly { tag: string; outcome: boolean }[], head: readonly { tag: string; outcome: boolean }[]) {
+  const width = Math.max(base.length, head.length)
+  if (width === 0) return 0
+  let mismatches = 0
+  for (let index = 0; index < width; index += 1) {
+    const left = base[index]
+    const right = head[index]
+    if (left === undefined || right === undefined || left.tag !== right.tag || left.outcome !== right.outcome) {
+      mismatches += 1
+    }
+  }
+  return mismatches / width
+}
+
 function chartValues(observations: ObservationBundle | null, observableId: string) {
   const rawBase = observations?.base[observableId]
   const rawHead = observations?.head[observableId]
+
+  const basePath = asBranchDecisions(rawBase)
+  const headPath = asBranchDecisions(rawHead)
+  if (basePath !== null || headPath !== null) {
+    const base = basePath ?? []
+    const head = headPath ?? []
+    const divergence = pathHamming(base, head)
+    return {
+      base: base.length,
+      head: head.length,
+      divergence,
+      baseLabel: base.length === 0 ? 'idle' : `${base.length} step${base.length === 1 ? '' : 's'}`,
+      headLabel: head.length === 0 ? 'idle' : `${head.length} step${head.length === 1 ? '' : 's'}`,
+    }
+  }
+
+  if (typeof rawBase === 'boolean' || typeof rawHead === 'boolean') {
+    const base = rawBase === true ? 1 : 0
+    const head = rawHead === true ? 1 : 0
+    return {
+      base,
+      head,
+      divergence: base === head ? 0 : 1,
+      baseLabel: rawBase === true ? 'allow' : rawBase === false ? 'deny' : String(rawBase ?? '—'),
+      headLabel: rawHead === true ? 'allow' : rawHead === false ? 'deny' : String(rawHead ?? '—'),
+    }
+  }
+
   if (typeof rawBase === 'string' || typeof rawHead === 'string') {
     const base = String(rawBase ?? '')
     const head = String(rawHead ?? '')
@@ -122,21 +190,54 @@ function chartValues(observations: ObservationBundle | null, observableId: strin
       headLabel: head,
     }
   }
+
+  if (rawBase !== null && typeof rawBase === 'object') {
+    const baseText = JSON.stringify(rawBase)
+    const headText = JSON.stringify(rawHead ?? null)
+    return {
+      base: 0,
+      head: 0,
+      divergence: baseText === headText ? 0 : 1,
+      baseLabel: 'structured',
+      headLabel: 'structured',
+    }
+  }
+
   const base = Number(rawBase ?? 0)
   const head = Number(rawHead ?? 0)
+  const finite = Number.isFinite(base) && Number.isFinite(head)
   return {
-    base,
-    head,
-    divergence: head === base ? 0 : Math.abs(head - base) / Math.max(Math.abs(head), Math.abs(base), 1),
-    baseLabel: String(base),
-    headLabel: String(head),
+    base: finite ? base : 0,
+    head: finite ? head : 0,
+    divergence: !finite
+      ? 0
+      : head === base
+        ? 0
+        : Math.abs(head - base) / Math.max(Math.abs(head), Math.abs(base), 1),
+    baseLabel: finite ? String(base) : '—',
+    headLabel: finite ? String(head) : '—',
   }
 }
 
 function observationCaption(observations: ObservationBundle | null, observableId: string) {
   if (observations === null) return null
+  const rawBase = observations.base[observableId]
+  const rawHead = observations.head[observableId]
+  const basePath = asBranchDecisions(rawBase)
+  const headPath = asBranchDecisions(rawHead)
+  if (basePath !== null || headPath !== null) {
+    const base = basePath ?? []
+    const head = headPath ?? []
+    if (pathHamming(base, head) === 0) {
+      return `Shared path: ${pathFingerprint(base) || 'idle'}.`
+    }
+    return `Old: ${pathFingerprint(base) || 'idle'} · New: ${pathFingerprint(head) || 'idle'}.`
+  }
   const values = chartValues(observations, observableId)
-  if (typeof observations.base[observableId] === 'string' || typeof observations.head[observableId] === 'string') {
+  if (typeof rawBase === 'boolean' || typeof rawHead === 'boolean') {
+    return `Old: ${values.baseLabel}; New: ${values.headLabel}.`
+  }
+  if (typeof rawBase === 'string' || typeof rawHead === 'string') {
     return `Base state: ${values.baseLabel}; Head state: ${values.headLabel}.`
   }
   const { base, head } = values
@@ -148,8 +249,53 @@ function isDegradationEvent(event: { type?: unknown }): event is DegradationEven
   return ['skipped', 'unscopable', 'inert', 'degraded'].includes(String(event.type))
 }
 
+/** Build a read-only duel side from a verified session's widget + measured cache. */
+function buildDuelSide(
+  changeId: string,
+  widget: WidgetConfig,
+  sourceFiles: SourceFiles,
+  positionCache: Map<string, ObservationBundle>,
+): DuelSide {
+  const observableId = widget.charts[0]?.observableId ?? widget.unionTree?.observableId ?? 'result'
+  const observableLabel = widget.charts[0]?.label ?? widget.unionTree?.label ?? 'Outcome'
+  const unit = widget.charts[0]?.unit ?? null
+  const seen = new Set<string>()
+  const frames: DuelFrame[] = []
+  let maxDivergence = 0
+  for (const observation of positionCache.values()) {
+    if (observation.position === undefined) continue
+    const key = canonicalPosition(observation.position)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const values = chartValues(observation, observableId)
+    frames.push({
+      baseLabel: String(values.baseLabel),
+      headLabel: String(values.headLabel),
+      divergence: values.divergence,
+      diverges: values.divergence > 0,
+      caption: observationCaption(observation, observableId),
+    })
+    maxDivergence = Math.max(maxDivergence, values.divergence)
+  }
+  maxDivergence = Math.max(maxDivergence, widget.surpriseMarker?.divergence ?? 0)
+  return {
+    changeId,
+    thesis: widget.thesis,
+    domainPack: widget.domainPack,
+    fidelityBand: widget.fidelityBand,
+    fidelityConfidence: widget.fidelityConfidence,
+    observableLabel,
+    unit,
+    base: sourceFiles.base,
+    head: sourceFiles.head,
+    frames,
+    maxDivergence,
+  }
+}
+
 function App() {
   const position = useMicroworldStore((state) => state.position)
+  const cache = useMicroworldStore((state) => state.cache)
   const replacePosition = useMicroworldStore((state) => state.replacePosition)
   const replaceCache = useMicroworldStore((state) => state.replaceCache)
   const putCachedObservation = useMicroworldStore((state) => state.putCachedObservation)
@@ -179,7 +325,15 @@ function App() {
   const [activeDemoId, setActiveDemoId] = useState<string | null>(null)
   const [shareStatus, setShareStatus] = useState<string | null>(null)
   const [receiptOpen, setReceiptOpen] = useState(false)
+  const [detailedOpen, setDetailedOpen] = useState(false)
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [showSim, setShowSim] = useState(false)
   const [permalinkLoading, setPermalinkLoading] = useState(false)
+  const [challengeMode, setChallengeMode] = useState(false)
+  const [userBest, setUserBest] = useState(0)
+  const [cardOpen, setCardOpen] = useState(false)
+  const [duel, setDuel] = useState<{ left: DuelSide; right: DuelSide } | null>(null)
+  const [duelPending, setDuelPending] = useState(false)
   const [composed, setComposed] = useState<ComposedWidgetConfig | null>(null)
   const socket = useRef<WebSocket | null>(null)
   const pendingRequests = useRef(new Map<string, PendingRequest>())
@@ -381,13 +535,28 @@ function App() {
     setReceiptOpen(false)
     setProspectivePending(false)
     setComposed(null)
+    setChallengeMode(false)
+    setUserBest(0)
+    setCardOpen(false)
+    surpriseBootstrapped.current = null
     selectedTracePosition.current = null
     replacePosition({})
     replaceCache(new Map())
   }, [replaceCache, replacePosition])
 
+  const backToIntake = useCallback(() => {
+    setIsPlaying(false)
+    setDetailedOpen(false)
+    setActiveDemoId(null)
+    setShowSim(false)
+    resetForNewRun()
+    setChangeId(null)
+    window.history.replaceState({}, '', '/')
+  }, [resetForNewRun])
+
   const beginChange = useCallback(async (path: string, body?: Record<string, unknown>) => {
     resetForNewRun()
+    setShowSim(true)
     setIntakePending(true)
     try {
       const response = await fetch(`${API_BASE}${path}`, {
@@ -414,6 +583,7 @@ function App() {
 
   const loadPermalink = useCallback(async (nextChangeId: string) => {
     setPermalinkLoading(true)
+    setShowSim(true)
     setError(null)
     setIntakePending(false)
     try {
@@ -491,7 +661,148 @@ function App() {
   const chart = widget === null ? null : widget.charts[0]
   const unionTree = widget?.unionTree ?? null
   const values = chart ? chartValues(observations, chart.observableId) : null
-  const caption = objectiveFinding ?? (chart ? observationCaption(observations, chart.observableId) : null)
+  const simValues = values ?? (unionTree ? chartValues(observations, unionTree.observableId) : null)
+  const simObservableLabel = chart?.label ?? unionTree?.label ?? 'Result'
+  const observableId = chart?.observableId ?? unionTree?.observableId ?? 'result'
+  const caption = objectiveFinding
+    ?? observationCaption(observations, observableId)
+    ?? null
+
+  // Each measured input becomes one "frame" in the replay timeline, tagged with
+  // how much the two versions diverge on it so the scrubber can color it.
+  const stepFrames = useMemo(() => {
+    const seen = new Set<string>()
+    const out: { position: KnobPosition; divergence: number; observation: ObservationBundle }[] = []
+    for (const observation of cache.values()) {
+      if (observation.position === undefined) continue
+      const key = canonicalPosition(observation.position)
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({
+        position: observation.position,
+        divergence: chartValues(observation, observableId).divergence,
+        observation,
+      })
+    }
+    return out
+  }, [cache, observableId])
+  const steps = useMemo(
+    () => stepFrames.map((frame) => ({ position: frame.position, divergence: frame.divergence })),
+    [stepFrames],
+  )
+  const measuredPositions = useMemo(() => steps.map((step) => step.position), [steps])
+
+  const surpriseIndex = useMemo(() => {
+    const surprise = widget?.surpriseMarker?.position
+    if (surprise === undefined) return -1
+    const key = canonicalPosition(surprise)
+    return steps.findIndex((step) => canonicalPosition(step.position) === key)
+  }, [steps, widget?.surpriseMarker?.position])
+
+  const currentStepIndex = useMemo(() => {
+    const key = canonicalPosition(position)
+    return steps.findIndex((step) => canonicalPosition(step.position) === key)
+  }, [steps, position])
+
+  // The largest divergence Lever actually measured — the score to beat in challenge mode.
+  const leverBest = useMemo(() => {
+    const stepsMax = steps.reduce((max, step) => Math.max(max, step.divergence), 0)
+    return Math.max(stepsMax, widget?.surpriseMarker?.divergence ?? 0)
+  }, [steps, widget?.surpriseMarker?.divergence])
+
+  // Break the PR: hide Lever's answer while the challenge is active.
+  const effectiveSurpriseIndex = challengeMode ? -1 : surpriseIndex
+
+  const seekStep = useCallback(
+    (index: number) => {
+      if (index < 0 || index >= steps.length) return
+      setIsPlaying(false)
+      replacePosition(steps[index].position)
+    },
+    [steps, replacePosition],
+  )
+
+  // Land on the surprise frame once the measured cache arrives — judges see the climax first.
+  const surpriseBootstrapped = useRef<string | null>(null)
+  useEffect(() => {
+    if (widget === null || surpriseIndex < 0) return
+    if (challengeMode) return
+    if (surpriseBootstrapped.current === widget.thesis) return
+    surpriseBootstrapped.current = widget.thesis
+    seekStep(surpriseIndex)
+  }, [widget, surpriseIndex, seekStep, challengeMode])
+
+  // Break the PR: record the biggest divergence the player has stumbled onto.
+  useEffect(() => {
+    if (!challengeMode) return
+    const found = simValues?.divergence ?? 0
+    setUserBest((best) => (found > best ? found : best))
+  }, [challengeMode, simValues])
+
+  const toggleChallenge = useCallback(() => {
+    setChallengeMode((on) => {
+      const next = !on
+      if (next) {
+        setUserBest(0)
+        seekStep(0)
+      }
+      return next
+    })
+  }, [seekStep])
+
+  const revealChallenge = useCallback(() => {
+    setChallengeMode(false)
+    if (surpriseIndex >= 0) seekStep(surpriseIndex)
+  }, [surpriseIndex, seekStep])
+
+  useEffect(() => {
+    if (!isPlaying) return
+    if (measuredPositions.length < 2) {
+      setIsPlaying(false)
+      return
+    }
+    let index = currentStepIndex >= 0 ? currentStepIndex : 0
+    const timer = window.setInterval(() => {
+      index = (index + 1) % measuredPositions.length
+      replacePosition(measuredPositions[index])
+    }, 1100)
+    return () => window.clearInterval(timer)
+    // currentStepIndex intentionally read once at start; excluding it keeps the
+    // interval from resetting every frame it advances.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, measuredPositions, replacePosition])
+
+  // Arrow keys / Space scrub the timeline like a game replay controller.
+  useEffect(() => {
+    if (!showSim || widget === null) return
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      if (target !== null) {
+        const tag = target.tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
+          return
+        }
+      }
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault()
+        seekStep((currentStepIndex < 0 ? 0 : currentStepIndex) - 1)
+      } else if (event.key === 'ArrowRight') {
+        event.preventDefault()
+        seekStep((currentStepIndex < 0 ? -1 : currentStepIndex) + 1)
+      } else if (event.key === ' ' || event.key === 'Spacebar') {
+        event.preventDefault()
+        if (steps.length > 1) setIsPlaying((playing) => !playing)
+      } else if (event.key === 's' || event.key === 'S') {
+        if (!challengeMode && surpriseIndex >= 0) {
+          event.preventDefault()
+          seekStep(surpriseIndex)
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [showSim, widget, currentStepIndex, seekStep, steps.length, surpriseIndex, challengeMode])
+
   const status = useMemo(() => {
     if (permalinkLoading) return 'Opening shared microworld…'
     if (objectiveLoading) return 'Searching boundary-weighted adversarial inputs…'
@@ -518,6 +829,34 @@ function App() {
     setAttributionMessage(null)
     setSelectedLine(responsibleLine)
   }, [observations, sourceFiles])
+
+  // Time-travel review: which source lines the current frame actually executed.
+  const baseExecutedLines = useMemo(
+    () => new Set<number>(observations?.trace?.base.executedLines ?? []),
+    [observations],
+  )
+  const headExecutedLines = useMemo(
+    () => new Set<number>(observations?.trace?.head.executedLines ?? []),
+    [observations],
+  )
+
+  // Diff-as-controller: jump to the first measured frame that executed a line.
+  const jumpToLineFrame = useCallback(
+    (version: 'base' | 'head', line: number) => {
+      const index = stepFrames.findIndex((frame) =>
+        (frame.observation.trace?.[version].executedLines ?? []).includes(line),
+      )
+      if (index >= 0) {
+        setAttributionMessage(null)
+        seekStep(index)
+        return
+      }
+      setAttributionMessage(
+        `No measured frame executed ${version} line ${line}. Try Play to widen the measured set.`,
+      )
+    },
+    [stepFrames, seekStep],
+  )
 
   const selectedSourceFile = selectedLine === null ? undefined : sourceFiles[selectedLine.version]
   const hasCurrentObservation = (
@@ -568,6 +907,36 @@ function App() {
     replacePosition(nextPosition)
   }, [replacePosition])
 
+  const startDuel = useCallback(async (otherId: string) => {
+    if (changeId === null || widget === null) {
+      setError('Open a verified microworld before starting a duel.')
+      return
+    }
+    setDuelPending(true)
+    try {
+      const response = await fetch(`${API_BASE}/diffs/${otherId}`)
+      if (!response.ok) {
+        throw new Error(response.status === 404 ? 'Unknown session to duel.' : `Load failed (${response.status}).`)
+      }
+      const payload = await response.json() as CompleteEvent | { type?: string }
+      if (payload.type !== 'complete') {
+        throw new Error('That session degraded — only verified microworlds can duel.')
+      }
+      const other = payload as CompleteEvent
+      const otherWidget = withWorldSpec(other.widgetConfig)
+      const rightCache = new Map(Object.entries(other.positionCache))
+      setIsPlaying(false)
+      setDuel({
+        left: buildDuelSide(changeId, widget, sourceFiles, cache),
+        right: buildDuelSide(other.changeId, otherWidget, other.sourceFiles, rightCache),
+      })
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not start the duel.')
+    } finally {
+      setDuelPending(false)
+    }
+  }, [changeId, widget, sourceFiles, cache])
+
   const runObjective = useCallback((objective: SearchObjective, unsafePredicate?: UnsafePredicate) => {
     if (socket.current?.readyState !== WebSocket.OPEN) {
       setError('The search connection is not ready.')
@@ -593,6 +962,7 @@ function App() {
     setPrUrl('')
     if (demoId === 'compose-hero1') {
       resetForNewRun()
+      setShowSim(true)
       setIntakePending(true)
       try {
         const response = await fetch(`${API_BASE}/compose/demos/hero1`)
@@ -624,6 +994,7 @@ function App() {
       setError('Run a demo or PR first so Lever has a base module to mutate.')
       return
     }
+    setShowSim(true)
     try {
       setError(null)
       setProgress([])
@@ -654,11 +1025,38 @@ function App() {
     }
   }, [connectToChange, hypothesis, sourceFiles.base?.path])
 
-  return (
-    <main className="min-h-screen px-4 py-8 text-[var(--lever-text)] sm:px-6">
-      <div className="mx-auto grid max-w-6xl gap-8 lg:grid-cols-[minmax(0,1fr)_17rem]">
-        <div className="space-y-7">
-          <header className="space-y-5">
+  const diverges = simValues ? simValues.divergence > 0 : false
+  const humanStep = currentStepIndex >= 0 ? currentStepIndex + 1 : null
+  const noteBody =
+    caption ??
+    widget?.surpriseMarker?.caption ??
+    (diverges
+      ? 'The two versions produce different results on this input.'
+      : 'Both versions behave identically on this input.')
+
+  if (duel !== null) {
+    return (
+      <main className="min-h-screen px-2 py-8 text-[var(--lever-text)] sm:px-6">
+        <ReceiptDuel left={duel.left} right={duel.right} onClose={() => setDuel(null)} />
+      </main>
+    )
+  }
+
+  if (!showSim) {
+    return (
+      <main className="min-h-screen px-4 py-10 text-[var(--lever-text)] sm:px-6">
+        <div className="mx-auto grid max-w-6xl gap-8 lg:grid-cols-[minmax(0,1fr)_17rem]">
+          <div className="space-y-8">
+            <header className="animate-rise space-y-3">
+              <p className="font-display text-4xl font-black tracking-tight text-[var(--lever-text)] sm:text-5xl">
+                Lever
+              </p>
+              <p className="max-w-2xl text-lg leading-relaxed text-[var(--lever-muted)]">
+                Turn a pull request into a <span className="font-semibold text-[var(--lever-text)]">playable, verified microworld</span>.
+                Paste a PR or try a demo — Lever runs the old and new code on the same inputs and shows you exactly where they diverge.
+              </p>
+            </header>
+
             <PrIntake
               prUrl={prUrl}
               onPrUrlChange={setPrUrl}
@@ -668,41 +1066,47 @@ function App() {
               onRunDemo={(demoId) => void runDemo(demoId)}
               intakePending={intakePending || permalinkLoading}
             />
-            <form
-              onSubmit={(event) => void submitProspective(event)}
-              className="lever-panel animate-rise max-w-3xl rounded-2xl border border-sky-200/80 bg-gradient-to-br from-sky-50 to-white p-4 text-[var(--lever-text)]"
-            >
-              <label htmlFor="prospective-hypothesis" className="font-display block text-base font-bold">
-                Prospective hypothesis
-              </label>
-              <p className="mt-1 text-sm text-[var(--lever-muted)]">
-                Generate one executable candidate from unwritten code, then compare it with the current base module from the active run.
-              </p>
-              <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-                <input
-                  id="prospective-hypothesis"
-                  aria-label="Prospective hypothesis"
-                  value={hypothesis}
-                  onChange={(event) => setHypothesis(event.target.value)}
-                  placeholder="What if the burst allowance were per-tenant instead of shared?"
-                  className="lever-input min-w-0 flex-1 rounded-xl border border-sky-200 bg-white px-4 py-2.5 text-sm"
-                />
-                <button
-                  type="submit"
-                  disabled={!hypothesis.trim() || sourceFiles.base === undefined}
-                  className="lever-btn rounded-xl bg-[var(--lever-secondary)] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
-                >
-                  Generate candidate
-                </button>
-              </div>
-            </form>
-            <p className="animate-fade max-w-3xl text-base leading-relaxed text-[var(--lever-muted)]">
+
+            {error ? (
+              <p role="alert" className="animate-rise text-sm font-medium text-[var(--lever-warning)]">{error}</p>
+            ) : null}
+          </div>
+
+          <aside className="animate-rise-delay-2 space-y-4 lg:sticky lg:top-6 lg:self-start">
+            <SessionLedger sessions={sessions} activeChangeId={changeId} onOpen={openSession} />
+          </aside>
+        </div>
+      </main>
+    )
+  }
+
+  return (
+    <main className="min-h-screen px-4 py-8 text-[var(--lever-text)] sm:px-6">
+      <div className="mx-auto grid max-w-6xl gap-8 lg:grid-cols-[minmax(0,1fr)_17rem]">
+        <div className="space-y-6">
+          <header className="animate-rise space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <button
+                type="button"
+                data-testid="back-to-intake"
+                onClick={backToIntake}
+                className="lever-btn rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-[var(--lever-muted)]"
+              >
+                ← New analysis
+              </button>
+              {widget ? (
+                <span className="lever-chip rounded-full border border-[var(--lever-primary)]/30 bg-[var(--lever-primary)]/5 px-3 py-1 text-xs font-semibold text-[var(--lever-primary)]">
+                  Confidence: {widget.fidelityBand} ({Math.round((widget.fidelityConfidence ?? 0) * 100)}%)
+                </span>
+              ) : null}
+            </div>
+            <h1 className="font-display max-w-3xl text-2xl font-bold leading-snug text-[var(--lever-text)]">
               {degradation
                 ? 'Lever stopped before rendering a toy.'
                 : widget?.thesis ?? (intakePending || prospectivePending || permalinkLoading
-                  ? 'Reading the change and preparing analysis…'
-                  : 'Waiting for a pull request URL or demo selection.')}
-            </p>
+                  ? 'Reading the change and preparing the simulation…'
+                  : 'Preparing analysis…')}
+            </h1>
           </header>
 
           <ol aria-label="Analysis progress" className="space-y-2 text-sm text-[var(--lever-muted)]">
@@ -737,99 +1141,241 @@ function App() {
 
           {degradation ? <DegradationPanel event={degradation} /> : null}
 
-          {!degradation && searchTrace.length > 0 ? (
-            <div className="animate-rise">
-              <SearchTrace
-                points={searchTrace}
-                controls={widget?.controls ?? []}
-                onSelectPosition={selectSearchPosition}
-              />
-            </div>
-          ) : null}
-
-          {!degradation && widget && (unionTree !== null || (chart && values)) ? (
-            <section className="animate-rise grid gap-8 lg:grid-cols-[18rem_minmax(0,1fr)]">
-              <div className="space-y-4">
-                <KnobPanel controls={widget.controls} />
-                <ObjectiveSelector
+          {!degradation && widget && simValues ? (
+            <section className="animate-rise space-y-4">
+              <div className="grid items-stretch gap-5 lg:grid-cols-2">
+                <CodeDiff
+                  base={sourceFiles.base}
+                  head={sourceFiles.head}
+                  baseExecutedLines={baseExecutedLines}
+                  headExecutedLines={headExecutedLines}
+                  responsibleLine={observations?.trace?.responsibleLine ?? null}
+                  onLineClick={jumpToLineFrame}
+                />
+                <GenreSimulation
+                  widget={widget}
+                  observations={observations}
+                  simValues={simValues}
+                  observableLabel={simObservableLabel}
+                  unit={chart?.unit ?? null}
+                  position={position}
                   controls={widget.controls}
-                  observableId={chart?.observableId ?? unionTree?.observableId ?? 'result'}
-                  disabled={objectiveLoading}
-                  onRun={runObjective}
+                  caption={caption ?? widget.surpriseMarker?.caption ?? null}
+                  measuredCount={measuredPositions.length}
+                  isPlaying={isPlaying}
+                  canPlay={measuredPositions.length > 1}
+                  onPlayToggle={() => setIsPlaying((playing) => !playing)}
                 />
               </div>
-              <div className="space-y-4">
-                <p className="text-sm text-[var(--lever-muted)]" aria-live="polite">{status}</p>
-                {bossCelebrate ? (
-                  <p
-                    role="status"
-                    data-testid="boss-celebrate"
-                    className="boss-celebrate rounded-2xl border border-[var(--lever-warning)] bg-orange-50 px-4 py-3 text-sm font-semibold text-[var(--lever-warning)]"
-                  >
-                    Unsafe state found empirically — not a model guess.
+
+              <TimelineScrubber
+                steps={steps}
+                currentIndex={currentStepIndex}
+                surpriseIndex={effectiveSurpriseIndex}
+                isPlaying={isPlaying}
+                canPlay={steps.length > 1}
+                onSeek={seekStep}
+                onPrev={() => seekStep((currentStepIndex < 0 ? 0 : currentStepIndex) - 1)}
+                onNext={() => seekStep((currentStepIndex < 0 ? -1 : currentStepIndex) + 1)}
+                onReset={() => seekStep(0)}
+                onPlayToggle={() => setIsPlaying((playing) => !playing)}
+                onJumpToSurprise={
+                  !challengeMode && surpriseIndex >= 0 ? () => seekStep(surpriseIndex) : undefined
+                }
+              />
+
+              <ChallengePanel
+                active={challengeMode}
+                userBest={userBest}
+                leverBest={leverBest}
+                hasSurprise={surpriseIndex >= 0}
+                onToggle={toggleChallenge}
+                onReveal={revealChallenge}
+              />
+
+              <div
+                data-testid="step-notes"
+                className={`rounded-2xl border px-4 py-3 ${
+                  diverges
+                    ? 'border-[var(--lever-warning)]/40 bg-orange-50/60'
+                    : 'border-slate-200 bg-white'
+                }`}
+                aria-live="polite"
+              >
+                <p className="font-display text-xs font-semibold uppercase tracking-wide text-[var(--lever-muted)]">
+                  {humanStep ? `Notes for step ${humanStep}` : 'Notes'}
+                </p>
+                <p className="mt-1 text-sm text-[var(--lever-text)]">
+                  {diverges ? '⚡ ' : '✓ '}
+                  {noteBody}
+                </p>
+                <p className="mt-1 text-xs text-[var(--lever-muted)]">{status}</p>
+                {attributionMessage ? (
+                  <p role="status" className="mt-1 text-xs font-medium text-[var(--lever-warning)]">
+                    {attributionMessage}
                   </p>
                 ) : null}
-                {unionTree ? (
-                  <UnionTree tree={unionTree} />
-                ) : chart && values ? (
-                  <MicroworldCanvas
-                    widget={widget}
-                    title={chart.label}
-                    divergence={values.divergence}
-                    baseValue={values.base}
-                    headValue={values.head}
-                    data={[{ x: 'Current position', base: values.base, head: values.head }]}
-                    onPointClick={openResponsibleLine}
-                  />
-                ) : null}
-                {attributionMessage ? <p role="status" className="text-sm text-[var(--lever-muted)]">{attributionMessage}</p> : null}
-                <p aria-live="polite" className="font-display text-lg font-semibold text-[var(--lever-text)]">
-                  {caption ?? widget.surpriseMarker?.caption ?? widget.worldSpec.narrationLine ?? 'Choose a cached position to inspect it.'}
+                <p className="mt-1 text-[10px] uppercase tracking-wide text-[var(--lever-muted)]">
+                  Keys · ← → scrub · Space play · S surprise
                 </p>
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => void pinCurrentPosition()}
-                    disabled={!hasCurrentObservation || pinStatus === 'Writing regression test…'}
-                    className="lever-btn rounded-xl border border-[var(--lever-primary)] px-4 py-2.5 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Pin this
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="share-permalink"
-                    onClick={() => void sharePermalink()}
-                    className="lever-btn rounded-xl border border-[var(--lever-secondary)] px-4 py-2.5 text-sm font-semibold text-[var(--lever-secondary)]"
-                  >
-                    Share
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="show-receipt"
-                    onClick={() => setReceiptOpen((open) => !open)}
-                    className="lever-btn rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold"
-                  >
-                    {receiptOpen ? 'Hide receipt' : 'Show receipt'}
-                  </button>
-                  {pinStatus ? <p role="status" className="text-sm text-[var(--lever-muted)]">{pinStatus}</p> : null}
-                  {shareStatus ? <p role="status" className="text-sm text-[var(--lever-muted)]">{shareStatus}</p> : null}
-                </div>
-                {changeId !== null ? (
-                  <ReceiptPanel
-                    changeId={changeId}
-                    widget={widget}
-                    open={receiptOpen}
-                    onClose={() => setReceiptOpen(false)}
-                  />
-                ) : null}
-                {selectedLine && selectedSourceFile ? (
-                  <SourceViewer
-                    responsibleLine={selectedLine}
-                    sourceFile={selectedSourceFile}
-                    onClose={() => setSelectedLine(null)}
-                  />
-                ) : null}
               </div>
+
+              <div className="lever-panel rounded-2xl p-4">
+                <p className="mb-2 font-display text-sm font-semibold text-[var(--lever-text)]">
+                  Change the input
+                </p>
+                <KnobPanel controls={widget.controls} />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void pinCurrentPosition()}
+                  disabled={!hasCurrentObservation || pinStatus === 'Writing regression test…'}
+                  className="lever-btn rounded-xl border border-[var(--lever-primary)] px-4 py-2.5 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Pin this
+                </button>
+                <button
+                  type="button"
+                  data-testid="share-permalink"
+                  onClick={() => void sharePermalink()}
+                  className="lever-btn rounded-xl border border-[var(--lever-secondary)] px-4 py-2.5 text-sm font-semibold text-[var(--lever-secondary)]"
+                >
+                  Share
+                </button>
+                <button
+                  type="button"
+                  data-testid="show-receipt"
+                  onClick={() => setReceiptOpen((open) => !open)}
+                  className="lever-btn rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold"
+                >
+                  {receiptOpen ? 'Hide receipt' : 'Show receipt'}
+                </button>
+                <button
+                  type="button"
+                  data-testid="open-card"
+                  onClick={() => setCardOpen(true)}
+                  className="lever-btn rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold"
+                >
+                  Trading card
+                </button>
+                <button
+                  type="button"
+                  data-testid="toggle-detailed"
+                  onClick={() => setDetailedOpen((open) => !open)}
+                  className="lever-btn rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-[var(--lever-muted)]"
+                >
+                  {detailedOpen ? 'Hide detailed view' : 'Show detailed view'}
+                </button>
+                {pinStatus ? <p role="status" className="text-sm text-[var(--lever-muted)]">{pinStatus}</p> : null}
+                {shareStatus ? <p role="status" className="text-sm text-[var(--lever-muted)]">{shareStatus}</p> : null}
+              </div>
+
+              {changeId !== null ? (
+                <ReceiptPanel
+                  changeId={changeId}
+                  widget={widget}
+                  open={receiptOpen}
+                  onClose={() => setReceiptOpen(false)}
+                />
+              ) : null}
+
+              <TradingCard
+                open={cardOpen}
+                onClose={() => setCardOpen(false)}
+                widget={widget}
+                changeId={changeId}
+                permalink={
+                  changeId !== null
+                    ? `${window.location.origin}${permalinkPath(changeId)}`
+                    : window.location.href
+                }
+                surpriseCaption={caption ?? widget.surpriseMarker?.caption ?? null}
+              />
+
+              {detailedOpen ? (
+                <section className="animate-rise space-y-6 border-t border-slate-200/70 pt-6">
+                  {searchTrace.length > 0 ? (
+                    <SearchTrace
+                      points={searchTrace}
+                      controls={widget.controls}
+                      onSelectPosition={selectSearchPosition}
+                    />
+                  ) : null}
+
+                  <div className="grid gap-8 lg:grid-cols-[18rem_minmax(0,1fr)]">
+                    <div className="space-y-4">
+                      <ObjectiveSelector
+                        controls={widget.controls}
+                        observableId={observableId}
+                        disabled={objectiveLoading}
+                        onRun={runObjective}
+                      />
+                      <form
+                        onSubmit={(event) => void submitProspective(event)}
+                        className="lever-panel rounded-2xl border border-sky-200/80 bg-gradient-to-br from-sky-50 to-white p-4"
+                      >
+                        <label htmlFor="prospective-hypothesis" className="font-display block text-sm font-bold">
+                          Prospective hypothesis
+                        </label>
+                        <p className="mt-1 text-xs text-[var(--lever-muted)]">
+                          Generate one executable candidate from unwritten code and compare it with the current base module.
+                        </p>
+                        <div className="mt-3 flex flex-col gap-2">
+                          <input
+                            id="prospective-hypothesis"
+                            aria-label="Prospective hypothesis"
+                            value={hypothesis}
+                            onChange={(event) => setHypothesis(event.target.value)}
+                            placeholder="What if the burst allowance were per-tenant?"
+                            className="lever-input min-w-0 flex-1 rounded-xl border border-sky-200 bg-white px-3 py-2 text-sm"
+                          />
+                          <button
+                            type="submit"
+                            disabled={!hypothesis.trim() || sourceFiles.base === undefined}
+                            className="lever-btn rounded-xl bg-[var(--lever-secondary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                          >
+                            Generate candidate
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                    <div className="space-y-4">
+                      {bossCelebrate ? (
+                        <p
+                          role="status"
+                          data-testid="boss-celebrate"
+                          className="boss-celebrate rounded-2xl border border-[var(--lever-warning)] bg-orange-50 px-4 py-3 text-sm font-semibold text-[var(--lever-warning)]"
+                        >
+                          Unsafe state found empirically — not a model guess.
+                        </p>
+                      ) : null}
+                      {unionTree ? (
+                        <UnionTree tree={unionTree} />
+                      ) : chart && values ? (
+                        <MicroworldCanvas
+                          widget={widget}
+                          title={chart.label}
+                          divergence={values.divergence}
+                          baseValue={values.base}
+                          headValue={values.head}
+                          data={[{ x: 'Current position', base: values.base, head: values.head }]}
+                          onPointClick={openResponsibleLine}
+                        />
+                      ) : null}
+                      {attributionMessage ? <p role="status" className="text-sm text-[var(--lever-muted)]">{attributionMessage}</p> : null}
+                      {selectedLine && selectedSourceFile ? (
+                        <SourceViewer
+                          responsibleLine={selectedLine}
+                          sourceFile={selectedSourceFile}
+                          onClose={() => setSelectedLine(null)}
+                        />
+                      ) : null}
+                    </div>
+                  </div>
+                </section>
+              ) : null}
             </section>
           ) : null}
 
@@ -847,6 +1393,8 @@ function App() {
             sessions={sessions}
             activeChangeId={changeId}
             onOpen={openSession}
+            onDuel={(otherId) => void startDuel(otherId)}
+            duelPending={duelPending}
           />
         </aside>
       </div>

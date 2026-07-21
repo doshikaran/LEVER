@@ -7,6 +7,7 @@ from domain.adversary import AdversaryResult
 from domain.fidelity_verifier import FidelityVerification
 from domain.harness_engineer import HarnessEngineer as RealHarnessEngineer
 from domain.line_attribution import UninstrumentableReferenceError
+from domain.ports import SandboxExecutionError
 from domain.schema import (
     Agreement,
     Coverage,
@@ -526,3 +527,34 @@ def test_registry_incompatibility_kicks_back_to_delta_analyst_once(monkeypatch) 
     assert len(llm.prompts) == 2
     assert "registered template for 'can' expects a permission matrix" in llm.prompts[1]
     assert "A previous proposal was schema-valid but Lever could not execute it" in llm.prompts[1]
+
+
+def test_sandbox_syntax_failure_degrades_honestly_instead_of_crashing(monkeypatch) -> None:
+    """A sandbox import/syntax failure becomes a version-aware degrade, not a 500."""
+    _counting_harness(monkeypatch)
+
+    class ExplodingVerifier:
+        def __init__(self, runtime):
+            pass
+
+        def verify(self, *args, **kwargs):
+            raise SandboxExecutionError(
+                "differential suite failed:   File \"/tmp/lever-pipeline/base.py\", "
+                "line 305\n    raise RuntimeError(f'{d} failed: {result['stderr']}')\n"
+                "SyntaxError: f-string: unmatched '['"
+            )
+
+    monkeypatch.setattr(orchestrator, "FidelityVerifier", ExplodingVerifier)
+    result = orchestrator.run_pipeline(
+        str(FIXTURE_DIR / "base.py"),
+        str(FIXTURE_DIR / "head.py"),
+        FakeSandboxRuntime(),
+        FakeLLMClient([_valid_response()]),
+        "fake-model",
+        "low",
+    )
+
+    assert isinstance(result, orchestrator.GracefulDegradation)
+    assert "sandbox" in result.reason.lower()
+    assert "LEVER_SANDBOX_TEMPLATE" in result.reason
+    assert result.plain_explanation is not None

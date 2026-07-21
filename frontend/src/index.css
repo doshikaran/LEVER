@@ -66,6 +66,29 @@ code,
 
 input[type='range'] {
   accent-color: var(--lever-primary);
+  cursor: pointer;
+}
+
+/* Tailwind v4's preflight drops the default pointer cursor on interactive
+   elements. Restore it everywhere it's expected so nothing feels dead. */
+button,
+[role='button'],
+[role='tab'],
+[role='option'],
+[role='switch'],
+summary,
+label[for],
+select,
+a[href],
+.recharts-wrapper,
+.recharts-surface {
+  cursor: pointer;
+}
+
+button:disabled,
+[role='button'][aria-disabled='true'],
+[disabled] {
+  cursor: not-allowed;
 }
 
 /* ——— Motion system ——— */

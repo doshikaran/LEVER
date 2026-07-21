@@ -87,6 +87,7 @@ describe('App escape hatch', () => {
     vi.unstubAllGlobals()
     useMicroworldStore.setState({ position: {}, cache: new Map() })
     chartClicks.mockReset()
+    window.history.replaceState({}, '', '/')
   })
 
   it('uses the current cached position trace to open and highlight the real head source line', async () => {
@@ -108,6 +109,7 @@ describe('App escape hatch', () => {
     render(<App />)
     fireEvent.click(await screen.findByRole('button', { name: 'Hero 1 · Rate limiter' }))
 
+    fireEvent.click(await screen.findByTestId('toggle-detailed'))
     await waitFor(() => expect(screen.getByText('Cache hit — no network call')).toBeTruthy())
     fireEvent.click(screen.getByTestId('evidence-view-toggle'))
     fireEvent.click(screen.getByTestId('chart-canvas'))
@@ -119,7 +121,7 @@ describe('App escape hatch', () => {
   })
 
   it('pins the exact already-cached position instead of sending observations from the browser', async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input)
       if (url.endsWith('/demos') && !url.includes('/run')) {
         return {

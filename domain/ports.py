@@ -6,6 +6,16 @@ from typing import Any, Protocol, runtime_checkable
 from domain.intake import CheckoutHandle, ResolvedPullRequest
 
 
+class SandboxExecutionError(RuntimeError):
+    """A staged program failed to run inside the sandbox (non-zero exit).
+
+    Subclasses ``RuntimeError`` so existing call sites and tests that expect a
+    ``RuntimeError`` keep working, while letting the orchestrator distinguish a
+    sandbox-side execution failure (which must degrade honestly) from an
+    unexpected domain bug (which must not be silently swallowed).
+    """
+
+
 @runtime_checkable
 class SandboxRuntime(Protocol):
     """Hexagonal port through which the domain controls sandbox infrastructure."""

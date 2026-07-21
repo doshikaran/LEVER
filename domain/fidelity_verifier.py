@@ -15,7 +15,7 @@ from domain.entry_point_registry import ReferenceProgramRequest, get_entry_point
 from domain.harness_engineer import HarnessPair
 from domain.harness_ir import render_reference_program
 from domain.line_attribution import trace_attribution
-from domain.ports import SandboxRuntime
+from domain.ports import SandboxExecutionError, SandboxRuntime
 from domain.schema import (
     Agreement,
     Coverage,
@@ -796,7 +796,7 @@ def _run_bundle(
     """Execute and parse a bundled program, surfacing a useful port-level error."""
     result = runtime.run_code(sandbox_id, code)
     if result["exit_code"] != 0:
-        raise RuntimeError(f"{description} failed: {result['stderr']}")
+        raise SandboxExecutionError(f"{description} failed: {result['stderr']}")
     parsed = json.loads(result["stdout"])
     if not isinstance(parsed, dict):
         raise TypeError(f"{description} did not return a JSON object")
@@ -819,7 +819,7 @@ def _write_source(runtime: SandboxRuntime, sandbox_id: str, path: str, source: s
     )
     result = runtime.run_code(sandbox_id, code)
     if result["exit_code"] != 0:
-        raise RuntimeError(f"Could not stage {path}: {result['stderr']}")
+        raise SandboxExecutionError(f"Could not stage {path}: {result['stderr']}")
 
 
 def _harness_stub_config(source: str, pair: HarnessPair) -> dict[str, Any]:

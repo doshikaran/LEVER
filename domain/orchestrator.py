@@ -1,6 +1,7 @@
 """Part 5 orchestration that composes Lever's independent domain agents."""
 
 import hashlib
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,7 +20,7 @@ from domain.harness_engineer import (
     UnsupportedTemplateProposal,
 )
 from domain.line_attribution import UninstrumentableReferenceError
-from domain.ports import LLMClient, SandboxRuntime
+from domain.ports import LLMClient, SandboxExecutionError, SandboxRuntime
 from domain.intake import CheckoutHandle
 from domain.schema import InteractionSpec, Provenance
 from domain.scout import scout
@@ -33,6 +34,12 @@ MAX_LOOP_B_KICKBACKS = 1
 MAX_PROPOSAL_RESELECTION_KICKBACKS = 1
 _SANDBOX_BASE_MODULE = "/tmp/lever-pipeline/base.py"
 _SANDBOX_HEAD_MODULE = "/tmp/lever-pipeline/head.py"
+# The instrumented pair is unparsed on the host's Python, then executed in the
+# sandbox. If the sandbox interpreter is older than the host, host-only syntax
+# (e.g. PEP 701 f-strings from Python 3.12) fails to import. Point this at a
+# template whose Python matches the host to verify such code instead of
+# degrading. Defaults to E2B's "base" template.
+_SANDBOX_TEMPLATE = os.getenv("LEVER_SANDBOX_TEMPLATE", "base")
 
 
 @dataclass(frozen=True)
@@ -195,7 +202,7 @@ def run_pipeline(
         f"One behavior changed: {scoped_change_set.entry_point.fn}.",
     )
 
-    sandbox_id = sandbox.create_sandbox("base")
+    sandbox_id = sandbox.create_sandbox(_SANDBOX_TEMPLATE)
     try:
         loop_b_kickbacks = 0
         # Registry incompatibility and unavailable decision-tree instrumentation
@@ -335,14 +342,25 @@ def run_pipeline(
                     "Building you something to pull on…",
                 )
 
-                fidelity = FidelityVerifier(sandbox).verify(
-                    sandbox_id,
-                    harness_pair,
-                    scoped_change_set,
-                    partial_spec,
-                    base_source,
-                    head_source,
-                )
+                try:
+                    fidelity = FidelityVerifier(sandbox).verify(
+                        sandbox_id,
+                        harness_pair,
+                        scoped_change_set,
+                        partial_spec,
+                        base_source,
+                        head_source,
+                    )
+                except SandboxExecutionError as error:
+                    return GracefulDegradation(
+                        _sandbox_failure_reason("differential suite", str(error)),
+                        plain_explanation=_sandbox_failure_explanation(
+                            partial_spec.thesis, str(error)
+                        ),
+                        loop_a_attempts=loop_a_attempt,
+                        proposedSpecs=tuple(proposed_specs),
+                        registryCompatibilityKickbacks=registryCompatibilityKickbacks,
+                    )
                 report = fidelity.report
                 if not report.symmetrist.passed or report.agreement.rate < 0.85:
                     # LOOP A: the next iteration re-enters precisely at Harness Engineer.
@@ -378,15 +396,26 @@ def run_pipeline(
                 continue
 
             assert fidelity is not None
-            adversary_result = Adversary(sandbox).search(
-                sandbox_id,
-                harness_pair,
-                partial_spec,
-                fidelity,
-                base_source,
-                head_source,
-                trace_callback=search_trace_callback,
-            )
+            try:
+                adversary_result = Adversary(sandbox).search(
+                    sandbox_id,
+                    harness_pair,
+                    partial_spec,
+                    fidelity,
+                    base_source,
+                    head_source,
+                    trace_callback=search_trace_callback,
+                )
+            except SandboxExecutionError as error:
+                return GracefulDegradation(
+                    _sandbox_failure_reason("adversary search", str(error)),
+                    plain_explanation=_sandbox_failure_explanation(
+                        partial_spec.thesis, str(error)
+                    ),
+                    divergence_report=_divergence_report(fidelity),
+                    proposedSpecs=tuple(proposed_specs),
+                    registryCompatibilityKickbacks=registryCompatibilityKickbacks,
+                )
             if adversary_callback is not None:
                 adversary_callback(adversary_result)
             if adversary_result.no_divergence:
@@ -464,6 +493,35 @@ def _emit_progress(
     except Exception:
         # Progress delivery must never fabricate or abort the verified pipeline.
         return
+
+
+def _sandbox_failure_reason(stage: str, stderr: str) -> str:
+    """Summarize a sandbox execution failure into one honest degrade reason."""
+    if _looks_like_version_mismatch(stderr):
+        return (
+            f"The verified pair could not be imported in the sandbox runtime during the "
+            f"{stage}: the instrumented source uses Python syntax the sandbox interpreter "
+            "does not support (likely a host/sandbox Python version mismatch). "
+            "Set LEVER_SANDBOX_TEMPLATE to a template whose Python matches the host."
+        )
+    return f"The verified pair failed to execute in the sandbox during the {stage}: {stderr.strip()}"
+
+
+def _sandbox_failure_explanation(thesis: str, stderr: str) -> str:
+    """Explain a sandbox execution failure without rendering a misleading toy."""
+    if _looks_like_version_mismatch(stderr):
+        return (
+            f"{thesis} Lever refuses to render a microworld it could not actually run: "
+            "the code imported cleanly on the host but not in the sandbox interpreter. "
+            "Run the sandbox on a Python version matching the host, then re-analyze."
+        )
+    return _plain_explanation(thesis, "this change in an environment that can execute the real code")
+
+
+def _looks_like_version_mismatch(stderr: str) -> bool:
+    """Detect the syntax/import failures that indicate a runtime version gap."""
+    markers = ("SyntaxError", "f-string", "unmatched", "invalid syntax")
+    return any(marker in stderr for marker in markers)
 
 
 def _plain_explanation(thesis: str, manual_input: str) -> str:

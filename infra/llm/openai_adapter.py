@@ -14,7 +14,7 @@ from domain.ports import LLMClient
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SCHEMA_NAME = "lever_response"
-_REQUEST_TIMEOUT_SECONDS = 25.0
+_REQUEST_TIMEOUT_SECONDS = float(os.getenv("LEVER_LLM_TIMEOUT_SECONDS", "25"))
 
 
 class OpenAIAdapter(LLMClient):

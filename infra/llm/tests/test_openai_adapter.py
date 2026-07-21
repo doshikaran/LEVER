@@ -41,7 +41,13 @@ def test_complete_uses_a_fresh_closed_client_with_a_hard_25_second_bound(
             self.output_text = output_text
 
     monkeypatch.setattr("infra.llm.openai_adapter.OpenAI", _FakeOpenAI)
-    adapter = OpenAIAdapter(model="test-model", reasoning_effort="high")
+    # Pin the bound explicitly so an ambient LEVER_LLM_TIMEOUT_SECONDS (used to
+    # widen the live demo budget) cannot make this wiring assertion flaky.
+    adapter = OpenAIAdapter(
+        model="test-model",
+        reasoning_effort="high",
+        request_timeout_seconds=25.0,
+    )
 
     assert adapter.complete("first", {"type": "object", "properties": {"answer": {"type": "integer"}}}) == {"answer": 1}
     assert adapter.complete("second", {"type": "object", "properties": {"answer": {"type": "integer"}}}) == {"answer": 1}
