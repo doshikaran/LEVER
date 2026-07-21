@@ -557,6 +557,95 @@ def test_prospective_never_marks_any_of_three_candidates_as_verified(tmp_path) -
     repository.close()
 
 
+def test_prospective_candidate_exception_does_not_discard_other_candidates_results(
+    tmp_path,
+) -> None:
+    """One candidate's uncaught pipeline exception must not erase the other two's successes.
+
+    Candidates 0 and 1 finish normally (each already persisted under its own
+    ``::candidate-i`` ledger key inside the pipeline run). Candidate 2's run
+    raises an uncaught exception that is not a CandidateGenerationError (those
+    only ever occur during up-front generation, before any verification
+    starts) and not a normal InteractionSpec/DegradeResult return -- e.g. a
+    sandbox-creation timeout, or any other orchestrator failure mode not
+    already converted to a GracefulDegradation. The whole run must not
+    collapse into one opaque top-level error: candidates 0 and 1's real
+    results must still reach the client and the ledger, and candidate 2 must
+    be reported as a per-candidate failure rather than silently vanishing.
+    """
+    base = tmp_path / "current.py"
+    base.write_text("class RateLimiter:\n    pass\n")
+    candidate_sources = [
+        _rate_limiter_candidate_source("return True"),
+        _rate_limiter_candidate_source("return False"),
+        _rate_limiter_candidate_source("return now > 0"),
+    ]
+    candidate_dir = tmp_path / "candidates"
+
+    def prospective_runner(
+        base_path,
+        head_path,
+        sandbox,
+        llm,
+        model,
+        reasoning_effort,
+        progress_callback,
+        adversary_callback,
+        search_trace_callback,
+    ) -> InteractionSpec:
+        if "candidate-2" in head_path:
+            raise RuntimeError("sandbox creation timed out")
+        return _spec()
+
+    repository = SQLiteRepository(tmp_path / "prospective.sqlite3")
+    app = create_app(
+        repository=repository,
+        runtime_factory=lambda: object(),
+        llm_factory=lambda _model, _effort: FakeLLMClient(
+            [
+                {"source": source, "summary": f"Candidate {index}."}
+                for index, source in enumerate(candidate_sources)
+            ]
+        ),
+        prospective_pipeline_runner=prospective_runner,
+        prospective_candidate_dir=candidate_dir,
+    )
+    with TestClient(app) as client:
+        accepted = client.post(
+            "/prospective",
+            json={
+                "base_file_path": str(base),
+                "hypothesis": "what if admission changed?",
+            },
+        )
+        change_id = accepted.json()["changeId"]
+        with client.websocket_connect(f"/ws/{change_id}") as websocket:
+            terminal = websocket.receive_json()
+
+    # The batch must still complete -- one candidate's exception must not
+    # degrade the entire run into a single top-level error.
+    assert terminal["type"] == "complete"
+    candidates = terminal["candidates"]
+    assert len(candidates) == 3
+
+    # Candidates 0 and 1 succeeded and must still carry their real, verified
+    # results, both in the terminal payload and in the per-candidate ledger.
+    for index in (0, 1):
+        assert candidates[index]["type"] == "complete"
+        assert candidates[index]["changeId"] == f"{change_id}::candidate-{index}"
+        assert candidates[index]["widgetConfig"]["speculative"] is True
+        assert repository.load(f"{change_id}::candidate-{index}") == candidates[index]
+
+    # Candidate 2's uncaught exception is reported honestly at its own index,
+    # instead of discarding the other two candidates' successes.
+    assert candidates[2]["type"] == "error"
+    assert candidates[2]["changeId"] == f"{change_id}::candidate-2"
+    assert "sandbox creation timed out" in candidates[2]["error"]
+    assert repository.load(f"{change_id}::candidate-2") == candidates[2]
+
+    repository.close()
+
+
 @pytest.mark.parametrize(
     ("hero_id", "hero_key"),
     (("hero1", "hero:hero1"), ("hero4", "hero:hero4")),

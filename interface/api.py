@@ -642,6 +642,41 @@ async def _run_prospective_in_background(
         repository.save(candidate_change_id, payload)
         return payload
 
+    def run_candidate_or_report_error(
+        index: int, candidate: GeneratedCandidate, llm: LLMClient
+    ) -> dict[str, Any]:
+        """Isolate one candidate's verification run so its failure cannot hide the others' results.
+
+        Candidate generation (generate_candidates, above) still fails as one
+        batch -- it produces every candidate's source up front, before any
+        verification starts, so there is no partial-success state to preserve
+        there. But once verification begins, each candidate's pipeline run
+        (Scout -> Delta Analyst -> Harness Engineer -> Fidelity Verifier ->
+        Adversary) is an independent unit of work against its own sandbox and
+        its own file. An uncaught exception from one candidate's run (a
+        sandbox-creation timeout, or any orchestrator failure mode not already
+        converted to a GracefulDegradation) must not discard the other
+        candidates' already-persisted, already-succeeded results.
+        """
+        try:
+            return run_one_candidate(index, candidate, llm)
+        except Exception as error:  # noqa: BLE001 - isolate this candidate only
+            candidate_change_id = f"{state.change_id}::candidate-{index}"
+            error_payload: dict[str, Any] = {
+                "type": "error",
+                "changeId": candidate_change_id,
+                # Same listing-surface convenience fields as the complete/
+                # degraded branches of _terminal_payload, so this candidate's
+                # failure is equally visible (and honestly labeled) in the
+                # Session Ledger rather than only inside a websocket stream.
+                "thesis": f"Candidate {index} failed: {error}",
+                "repo": None,
+                "commit": None,
+                "error": f"{type(error).__name__}: {error}",
+            }
+            repository.save(candidate_change_id, error_payload)
+            return error_payload
+
     def invoke() -> list[dict[str, Any]]:
         llm = llm_factory(model, reasoning_effort)
         base_source = state.base_path.read_text()
@@ -649,7 +684,7 @@ async def _run_prospective_in_background(
             llm, base_source, hypothesis, count=_PROSPECTIVE_CANDIDATE_COUNT
         )
         return [
-            run_one_candidate(index, candidate, llm)
+            run_candidate_or_report_error(index, candidate, llm)
             for index, candidate in enumerate(candidates)
         ]
 
