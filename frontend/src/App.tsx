@@ -168,6 +168,11 @@ function dispatchEvaluationRequest(
 function App() {
   const [selectedHeroId, setSelectedHeroId] = useState(HEROES[0].id)
   const selectedHero = HEROES.find((hero) => hero.id === selectedHeroId) ?? HEROES[0]
+  // Computed once, from the URL present at the moment this component first
+  // mounted — never re-read on later renders. Used solely to decide whether
+  // the *very first* run of the default-hero-diff effect below should be
+  // suppressed in favor of the permalink load (see hasSuppressedInitialHeroRun).
+  const [hadChangeIdOnMount] = useState(() => new URLSearchParams(window.location.search).has('changeId'))
   const position = useMicroworldStore((state) => state.position)
   const replacePosition = useMicroworldStore((state) => state.replacePosition)
   const replaceCache = useMicroworldStore((state) => state.replaceCache)
@@ -199,6 +204,12 @@ function App() {
   const positionVersion = useRef(0)
   const dragSettleTimer = useRef<number | undefined>(undefined)
   const selectedTracePosition = useRef<KnobPosition | null>(null)
+  // Tracks whether the default-hero-diff effect below is about to run for the
+  // very first time. Flipped to false the first time that effect runs, and
+  // never reset — so only that first run can ever be suppressed by
+  // hadChangeIdOnMount; any later run (e.g. the user switching heroes via the
+  // Task 4 switcher) always proceeds normally regardless of the URL.
+  const isFirstHeroEffectRun = useRef(true)
 
   const evaluatePosition = useCallback(async (nextPosition: KnobPosition, version: number) => {
     // A new input invalidates a prior source selection immediately.  Do this
@@ -422,7 +433,7 @@ function App() {
   // one. Also used directly by the Session Ledger sidebar's onOpen.
   const openChangeId = useCallback(async (targetChangeId: string) => {
     try {
-      const response = await fetch(`${API_BASE}/diffs/${targetChangeId}`)
+      const response = await fetch(`${API_BASE}/diffs/${encodeURIComponent(targetChangeId)}`)
       if (!response.ok) throw new Error(`Could not load changeId ${targetChangeId} (${response.status}).`)
       const payload = await response.json() as CompleteEvent | DegradationEvent
       if (payload.type === 'complete') {
@@ -458,6 +469,21 @@ function App() {
   }, [openChangeId])
 
   useEffect(() => {
+    const isInitialRun = isFirstHeroEffectRun.current
+    isFirstHeroEffectRun.current = false
+
+    // A permalink (?changeId=... at initial mount) is being loaded by the
+    // effect above via a fast REST fetch. Generating a fresh hero-1 diff is
+    // realistically much slower (real LLM/adversary-search pipeline), so if
+    // both ran unconditionally the permalinked widget would render first and
+    // then be silently overwritten seconds later when hero-1's pipeline
+    // finally completes. Skip *only* this automatic, unrequested initial
+    // kickoff — any later run of this effect (the user clicking a different
+    // hero button) is unaffected and behaves exactly as before.
+    if (isInitialRun && hadChangeIdOnMount) {
+      return
+    }
+
     const controller = new AbortController()
     let disposed = false
 
@@ -507,7 +533,7 @@ function App() {
       rejectPendingGridResolvers('Hero changed before this position could be evaluated')
       socket.current?.close()
     }
-  }, [connectToChange, selectedHeroId, selectedHero, replaceCache, replacePosition, rejectPendingGridResolvers])
+  }, [connectToChange, selectedHeroId, selectedHero, replaceCache, replacePosition, rejectPendingGridResolvers, hadChangeIdOnMount])
 
   useEffect(() => {
     if (widget === null || degradation !== null || Object.keys(position).length === 0) return

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useMicroworldStore } from './store/useMicroworldStore'
 import type { CompleteEvent } from './types'
@@ -71,8 +71,10 @@ describe('App permalink open', () => {
         return { ok: true, json: async () => permalinked }
       }
       if (url.endsWith('/diffs')) {
-        // Hero 1's own startup request; deliberately never resolved via the
-        // websocket below, so only the permalink target can drive the widget.
+        // If this ever fires it means the default hero-1 kickoff was not
+        // suppressed — the bug this test guards against. It is never expected
+        // to resolve in this test, so returning a distinct changeId makes any
+        // regression visible rather than silently matching the permalink one.
         return { ok: true, json: async () => ({ changeId: 'hero1-change-id' }) }
       }
       if (url.includes('/ledger')) {
@@ -95,6 +97,50 @@ describe('App permalink open', () => {
 
     await waitFor(() =>
       expect(fetchMock.mock.calls.some(([requestUrl]) => String(requestUrl).includes('/ledger'))).toBe(true),
+    )
+
+    // The critical regression this test exists to catch: with ?changeId= on
+    // the URL, the pre-existing default-hero-diff effect must NOT also POST
+    // a fresh /diffs for hero 1. If it did, that slower real-pipeline result
+    // would arrive later and silently overwrite the permalinked widget via
+    // the same applyComplete() call — defeating the permalink feature.
+    expect(fetchMock.mock.calls.some(([requestUrl]) => String(requestUrl).endsWith('/diffs'))).toBe(false)
+  })
+
+  it('still allows switching to a different hero after a permalink load, starting a fresh diff for it', async () => {
+    window.history.pushState({}, '', `/?changeId=${permalinked.changeId}`)
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes(`/diffs/${permalinked.changeId}`)) {
+        return { ok: true, json: async () => permalinked }
+      }
+      if (url.endsWith('/diffs') && init?.method === 'POST') {
+        return { ok: true, json: async () => ({ changeId: 'hero2-change-id' }) }
+      }
+      if (url.includes('/ledger')) {
+        return { ok: true, json: async () => ({ entries: [] }) }
+      }
+      throw new Error(`Unexpected fetch in permalink hero-switch test: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('WebSocket', InertSocket)
+
+    render(<App />)
+
+    expect(await screen.findByText(permalinked.widgetConfig.thesis)).toBeTruthy()
+
+    // No automatic hero-diff POST yet — same guard as the test above.
+    expect(fetchMock.mock.calls.some(([requestUrl]) => String(requestUrl).endsWith('/diffs'))).toBe(false)
+
+    // Clicking a hero button is an explicit user action, distinct from the
+    // suppressed automatic initial kickoff, and must still start a fresh diff.
+    fireEvent.click(screen.getByRole('button', { name: /Hero 2/ }))
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([requestUrl], index) =>
+        String(requestUrl).endsWith('/diffs') && fetchMock.mock.calls[index][1]?.method === 'POST',
+      )).toBe(true),
     )
   })
 })
