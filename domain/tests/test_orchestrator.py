@@ -379,8 +379,10 @@ def test_loop_b_terminal_inert_retains_each_delta_proposal(monkeypatch) -> None:
     ]
 
 
-def test_unregistered_entry_point_returns_graceful_degradation_without_execution(monkeypatch) -> None:
-    """Unsupported shapes stop at Harness Engineer before a harness or reference runs."""
+def test_unregistered_entry_point_uses_generative_path_instead_of_registry_hard_gate(
+    monkeypatch,
+) -> None:
+    """Unknown shapes attempt generative IR; registry miss is no longer a hard stop."""
     unregistered_scope = ScopedChangeSet(
         entry_point=EntryPoint(
             file=str(FIXTURE_DIR / "head.py"),
@@ -392,6 +394,17 @@ def test_unregistered_entry_point_returns_graceful_degradation_without_execution
     runtime = FakeSandboxRuntime()
     llm = FakeLLMClient([_valid_response()])
     monkeypatch.setattr(orchestrator, "scout", lambda *args: unregistered_scope)
+    attempts: list[int] = []
+
+    class GenerativeFailingHarnessEngineer:
+        def generate(self, *_args, **_kwargs):
+            attempts.append(1)
+            raise orchestrator.GenerativeHarnessError(
+                "generative harness could not be built for this entry-point shape: "
+                "FutureLimiter.evaluate: unsupported dependency surface"
+            )
+
+    monkeypatch.setattr(orchestrator, "HarnessEngineer", GenerativeFailingHarnessEngineer)
 
     result = orchestrator.run_pipeline(
         str(FIXTURE_DIR / "base.py"),
@@ -403,9 +416,10 @@ def test_unregistered_entry_point_returns_graceful_degradation_without_execution
     )
 
     assert isinstance(result, orchestrator.GracefulDegradation)
-    assert result.reason == "no harness template registered for this entry-point shape"
+    assert "generative harness could not be built" in result.reason
+    assert result.reason != "no harness template registered for this entry-point shape"
+    assert len(attempts) == 3
     assert runtime.created_templates == ["base"]
-    assert len(llm.prompts) == 1
     assert not runtime.run_calls
 
 

@@ -1,6 +1,9 @@
 """Protocol interfaces that form the domain's only boundary to infrastructure."""
 
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+from domain.intake import CheckoutHandle, ResolvedPullRequest
 
 
 @runtime_checkable
@@ -35,3 +38,21 @@ class Repository(Protocol):
     def save(self, key: str, value: dict) -> None: ...
 
     def load(self, key: str) -> dict | None: ...
+
+    def list_keys(self, *, limit: int = 50) -> list[str]:
+        """Return recent ledger keys (newest first when the adapter can order)."""
+        ...
+
+
+@runtime_checkable
+class PullRequestResolver(Protocol):
+    """Hexagonal port that turns a hosting-provider PR URL into checkout coordinates."""
+
+    def resolve(self, url: str) -> ResolvedPullRequest: ...
+
+
+@runtime_checkable
+class DualCheckout(Protocol):
+    """Hexagonal port that materializes base and head trees for one resolved PR."""
+
+    def materialize(self, resolved: ResolvedPullRequest, work_root: Path) -> CheckoutHandle: ...

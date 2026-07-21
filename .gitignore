@@ -9,3 +9,4 @@ frontend/.vite/
 data/lever-sessions.sqlite3
 data/lever-sessions.sqlite3-shm
 data/lever-sessions.sqlite3-wal
+data/checkouts/

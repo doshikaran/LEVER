@@ -33,6 +33,13 @@ const complete: CompleteEvent = {
       scale: 'linear', unit: 'requests/s', axisRole: null,
     }],
     charts: [{ observableId: 'admitted', label: 'Admitted', render: 'timeseries', compareMode: 'overlay', unit: 'requests', yAxisZeroAnchored: true }],
+    worldSpec: {
+      genre: 'throughput',
+      stage: { kind: 'arena', layout: 'full-bleed' },
+      affordances: ['particles', 'evidence-chart', 'fog-of-war'],
+      narrationLine: 'Measured difference.',
+      playHints: ['Drag load until the gates diverge.'],
+    },
     initialPosition: { rps: 3 },
     surpriseMarker: null,
     presets: [],
@@ -83,15 +90,26 @@ describe('App escape hatch', () => {
   })
 
   it('uses the current cached position trace to open and highlight the real head source line', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ changeId: complete.changeId }),
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/demos') && !url.includes('/run')) {
+        return {
+          ok: true,
+          json: async () => [{ id: 'hero1', label: 'Hero 1 · Rate limiter', description: 'demo' }],
+        }
+      }
+      if (url.endsWith('/sessions')) {
+        return { ok: true, json: async () => [] }
+      }
+      return { ok: true, json: async () => ({ changeId: complete.changeId }) }
     }))
     vi.stubGlobal('WebSocket', TraceSocket)
 
     render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Hero 1 · Rate limiter' }))
 
     await waitFor(() => expect(screen.getByText('Cache hit — no network call')).toBeTruthy())
+    fireEvent.click(screen.getByTestId('evidence-view-toggle'))
     fireEvent.click(screen.getByTestId('chart-canvas'))
     expect(chartClicks).toHaveBeenCalledOnce()
 
@@ -101,26 +119,37 @@ describe('App escape hatch', () => {
   })
 
   it('pins the exact already-cached position instead of sending observations from the browser', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ changeId: complete.changeId }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ testPath: '/repo/pinned_tests/test_lever_trace.py' }),
-      })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/demos') && !url.includes('/run')) {
+        return {
+          ok: true,
+          json: async () => [{ id: 'hero1', label: 'Hero 1 · Rate limiter', description: 'demo' }],
+        }
+      }
+      if (url.endsWith('/sessions')) {
+        return { ok: true, json: async () => [] }
+      }
+      if (url.includes('/pin')) {
+        return {
+          ok: true,
+          json: async () => ({ testPath: '/repo/pinned_tests/test_lever_trace.py' }),
+        }
+      }
+      return { ok: true, json: async () => ({ changeId: complete.changeId }) }
+    })
     vi.stubGlobal('fetch', fetchMock)
     vi.stubGlobal('WebSocket', TraceSocket)
 
     render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Hero 1 · Rate limiter' }))
 
     await waitFor(() => expect(screen.getByText('Cache hit — no network call')).toBeTruthy())
     fireEvent.click(screen.getByRole('button', { name: 'Pin this' }))
 
     expect(await screen.findByText('Pinned regression test: /repo/pinned_tests/test_lever_trace.py')).toBeTruthy()
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(fetchMock.mock.calls[1]?.[0]).toContain('/diffs/trace-test/pin')
-    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ position: { rps: 3 } })
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('/diffs/trace-test/pin'))).toBe(true)
+    const pinCall = fetchMock.mock.calls.find((call) => String(call[0]).includes('/pin'))
+    expect(JSON.parse(String(pinCall?.[1]?.body))).toEqual({ position: { rps: 3 } })
   })
 })

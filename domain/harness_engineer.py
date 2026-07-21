@@ -4,26 +4,31 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from domain.entry_point_registry import HarnessBodyRequest, get_entry_point_template
+from domain.entry_point_registry import EntryPointTemplate, HarnessBodyRequest, get_entry_point_template
+from domain.harness_ir import HarnessIR, render_harness_source
+from domain.harness_proposer import HarnessProposer
 from domain.line_attribution import UninstrumentableReferenceError, instrument_branch_source
-from domain.ports import SandboxRuntime
+from domain.ports import LLMClient, SandboxRuntime
 from domain.schema import (
     DepEntry,
+    DependencyLedger,
     DomainPackId,
     Knob,
     Observable,
     PartialInteractionSpec,
     ScopedChangeSet,
 )
+from domain.stubs import PlannedStub, stub_plan
 
 
 _MINIMAL_STUB_KINDS = frozenset({"network", "db", "native"})
 _LIVE_IDENTITY_MARKERS = frozenset({"auth0", "identity", "idp", "oauth", "saml"})
 NO_HARNESS_TEMPLATE_REASON = "no harness template registered for this entry-point shape"
+GENERATIVE_HARNESS_FAILED_REASON = "generative harness could not be built for this entry-point shape"
 
 
 class NoHarnessTemplateRegistered(ValueError):
-    """Raised only at the domain boundary when Scout's shape lacks an executable template."""
+    """Legacy signal retained for callers that still special-case registry misses."""
 
     def __init__(self, entry_point_fn: str) -> None:
         super().__init__(f"{NO_HARNESS_TEMPLATE_REASON}: {entry_point_fn}")
@@ -31,6 +36,10 @@ class NoHarnessTemplateRegistered(ValueError):
 
 class UnsupportedTemplateProposal(ValueError):
     """Raised when a registered template cannot faithfully consume a valid spec."""
+
+
+class GenerativeHarnessError(ValueError):
+    """Raised when generative IR construction fails for an unregistered shape."""
 
 
 @dataclass(frozen=True)
@@ -89,13 +98,15 @@ class HarnessPair:
     stub_config: tuple[DependencyStub, ...]
     uncertainty_specs: tuple[DependencyStub, ...]
     workload_driver: WorkloadDriver
+    generative_ir: HarnessIR | None = None
 
 
 @dataclass(frozen=True)
 class VerifierFeedback:
-    """Placeholder input Fidelity Verifier will eventually return to retries."""
+    """Feedback Fidelity Verifier may return into harness retries."""
 
     implicated_dependencies: tuple[str, ...] = ()
+    divergence_summary: str | None = None
 
 
 @dataclass(frozen=True)
@@ -119,7 +130,10 @@ class RetryOutcome:
 
 
 class HarnessEngineer:
-    """Generates symmetric Python harnesses and the Phase 4 retry configuration."""
+    """Generates symmetric Python harnesses via registry fast-path or generative IR."""
+
+    def __init__(self, llm: LLMClient | None = None) -> None:
+        self._proposer = HarnessProposer(llm)
 
     def generate(
         self,
@@ -129,8 +143,10 @@ class HarnessEngineer:
         head_module_path: str,
         base_source: str | None = None,
         head_source: str | None = None,
+        *,
+        repair_feedback: str | None = None,
     ) -> HarnessPair:
-        """Generate the base/head pair from one template with import path as its sole delta."""
+        """Generate the base/head pair; registry match is preferred when compatible."""
         return build_harness_pair(
             scoped_change_set,
             partial_spec.knobs,
@@ -140,6 +156,9 @@ class HarnessEngineer:
             domain_pack=partial_spec.domainPack,
             base_source=base_source,
             head_source=head_source,
+            partial_spec=partial_spec,
+            proposer=self._proposer,
+            repair_feedback=repair_feedback,
         )
 
 
@@ -152,8 +171,11 @@ def build_harness_pair(
     domain_pack: DomainPackId | None = None,
     base_source: str | None = None,
     head_source: str | None = None,
+    partial_spec: PartialInteractionSpec | None = None,
+    proposer: HarnessProposer | None = None,
+    repair_feedback: str | None = None,
 ) -> HarnessPair:
-    """Build a symmetric pair from the entry point's registered source template."""
+    """Build a symmetric pair from registry fast-path or generative HarnessIR."""
     entry_point = scoped_change_set.entry_point
     if entry_point is None:
         raise ValueError("Harness Engineer requires a scoped entry point")
@@ -171,14 +193,70 @@ def build_harness_pair(
             f"Cannot safely stub live identity-provider dependency `{unstubbable}`; "
             "the generated substitute would change authentication behavior"
         )
+
     template = get_entry_point_template(entry_point.fn)
-    if template is None:
-        raise NoHarnessTemplateRegistered(entry_point.fn)
-    incompatibility = template.proposal_shape.incompatibility_reason(
-        entry_point.fn, knobs, observables
-    )
-    if incompatibility is not None:
-        raise UnsupportedTemplateProposal(incompatibility)
+    if template is not None:
+        incompatibility = template.proposal_shape.incompatibility_reason(
+            entry_point.fn, knobs, observables
+        )
+        if incompatibility is not None:
+            raise UnsupportedTemplateProposal(incompatibility)
+        return _build_from_registry(
+            scoped_change_set,
+            knobs,
+            observables,
+            base_module_path,
+            head_module_path,
+            domain_pack,
+            base_source,
+            head_source,
+            template,
+        )
+
+    if partial_spec is None:
+        if domain_pack is None:
+            raise GenerativeHarnessError(
+                f"{GENERATIVE_HARNESS_FAILED_REASON}: {entry_point.fn}"
+            )
+        partial_spec = PartialInteractionSpec(
+            thesis="Generative harness",
+            domainPack=domain_pack,
+            knobs=knobs,
+            observables=observables,
+        )
+    try:
+        return _build_from_generative_ir(
+            scoped_change_set,
+            partial_spec,
+            base_module_path,
+            head_module_path,
+            domain_pack,
+            base_source,
+            head_source,
+            proposer or HarnessProposer(),
+            repair_feedback,
+        )
+    except GenerativeHarnessError:
+        raise
+    except Exception as error:
+        raise GenerativeHarnessError(
+            f"{GENERATIVE_HARNESS_FAILED_REASON}: {entry_point.fn}: {error}"
+        ) from error
+
+
+def _build_from_registry(
+    scoped_change_set: ScopedChangeSet,
+    knobs: list[Knob],
+    observables: list[Observable],
+    base_module_path: str,
+    head_module_path: str,
+    domain_pack: DomainPackId | None,
+    base_source: str | None,
+    head_source: str | None,
+    template: EntryPointTemplate,
+) -> HarnessPair:
+    """Preserve the v2 hero fast-path."""
+    assert scoped_change_set.entry_point is not None
     stubs = tuple(
         _dependency_stub(entry)
         for entry in scoped_change_set.dependency_ledger.entries
@@ -191,7 +269,7 @@ def build_harness_pair(
     config_knobs = _config_knobs(knobs)
     defaults = _default_config(knobs)
     shared_request = {
-        "entry_point_fn": entry_point.fn,
+        "entry_point_fn": scoped_change_set.entry_point.fn,
         "default_config": defaults,
         "config_knobs": config_knobs,
         "driver_knobs": driver.knob_definitions,
@@ -207,28 +285,78 @@ def build_harness_pair(
     base_instrumented_source = None
     head_instrumented_source = None
     if domain_pack is DomainPackId.DECISION_TREE:
-        # C-5: these are checked-out module transforms, not harness-only hooks.
-        # Fidelity stages the same transformed text for both the harness import
-        # and its independent reference-program import.
-        base_instrumented_source = _instrumented_module_source(
-            base_module_path, base_source
-        )
-        head_instrumented_source = _instrumented_module_source(
-            head_module_path, head_source
-        )
+        base_instrumented_source = _instrumented_module_source(base_module_path, base_source)
+        head_instrumented_source = _instrumented_module_source(head_module_path, head_source)
         harness_a_source = _with_branch_trace_adapter(harness_a_source)
         harness_b_source = _with_branch_trace_adapter(harness_b_source)
     _assert_module_path_is_only_difference(harness_a_source, harness_b_source)
     return HarnessPair(
-        harness_a=HarnessArtifact(
-            harness_a_source, base_module_path, base_instrumented_source
-        ),
-        harness_b=HarnessArtifact(
-            harness_b_source, head_module_path, head_instrumented_source
-        ),
+        harness_a=HarnessArtifact(harness_a_source, base_module_path, base_instrumented_source),
+        harness_b=HarnessArtifact(harness_b_source, head_module_path, head_instrumented_source),
         stub_config=stubs,
         uncertainty_specs=stubs,
         workload_driver=driver,
+        generative_ir=None,
+    )
+
+
+def _build_from_generative_ir(
+    scoped_change_set: ScopedChangeSet,
+    partial_spec: PartialInteractionSpec,
+    base_module_path: str,
+    head_module_path: str,
+    domain_pack: DomainPackId | None,
+    base_source: str | None,
+    head_source: str | None,
+    proposer: HarnessProposer,
+    repair_feedback: str | None,
+) -> HarnessPair:
+    """Render a pair from HarnessIR so unknown entry points remain verifiable."""
+    ir, plan = proposer.propose(
+        scoped_change_set, partial_spec, repair_feedback=repair_feedback
+    )
+    stubs = tuple(_planned_to_dependency_stub(stub) for stub in plan.stubs)
+    driver = _workload_driver(partial_spec.knobs)
+    harness_a_source = render_harness_source(
+        ir,
+        module_path=base_module_path,
+        knobs=partial_spec.knobs,
+        observables=partial_spec.observables,
+        stubs=plan.stubs,
+    )
+    harness_b_source = render_harness_source(
+        ir,
+        module_path=head_module_path,
+        knobs=partial_spec.knobs,
+        observables=partial_spec.observables,
+        stubs=plan.stubs,
+    )
+    base_instrumented_source = None
+    head_instrumented_source = None
+    if domain_pack is DomainPackId.DECISION_TREE:
+        base_instrumented_source = _instrumented_module_source(base_module_path, base_source)
+        head_instrumented_source = _instrumented_module_source(head_module_path, head_source)
+        harness_a_source = _with_branch_trace_adapter(harness_a_source)
+        harness_b_source = _with_branch_trace_adapter(harness_b_source)
+    _assert_module_path_is_only_difference(harness_a_source, harness_b_source)
+    return HarnessPair(
+        harness_a=HarnessArtifact(harness_a_source, base_module_path, base_instrumented_source),
+        harness_b=HarnessArtifact(harness_b_source, head_module_path, head_instrumented_source),
+        stub_config=stubs,
+        uncertainty_specs=stubs,
+        workload_driver=driver,
+        generative_ir=ir,
+    )
+
+
+def _planned_to_dependency_stub(stub: PlannedStub) -> DependencyStub:
+    return DependencyStub(
+        dependency=stub.dependency,
+        kind=stub.kind,
+        parameters={
+            name: UncertaintySpec(spec.default, spec.distribution)
+            for name, spec in stub.parameters.items()
+        },
     )
 
 
@@ -247,7 +375,7 @@ def _instrumented_module_source(module_path: str, source: str | None) -> str:
 
 def _with_branch_trace_adapter(source: str) -> str:
     """Expose the transformed module's branch vector through the existing harness trace."""
-    adapter = """\
+    adapter = """
 
 # C-5 adapter: expose the existing sys.settrace collector as the observable.
 _lever_original_run = run
@@ -261,8 +389,7 @@ def run(config=None, seed=0):
     return result
 """
     line_hits = "    line_hits = {}\n"
-    trace_hook = """\
-
+    trace_hook = """
     branch_decisions = []
 """
     if line_hits not in source:
@@ -315,7 +442,6 @@ def retry_plan(
         for entry in scoped_change_set.dependency_ledger.entries
         if entry.kind in _MINIMAL_STUB_KINDS
     )
-    # TODO(phase-4): Fidelity Verifier supplies only the deps implicated by its divergence report.
     feedback = verifier_feedback or VerifierFeedback()
     expanded = tuple(dict.fromkeys((*minimal, *feedback.implicated_dependencies)))
     innermost = _innermost_target(scoped_change_set, entry_point.fn)
@@ -332,10 +458,9 @@ def run_retry_loop(
     attempts: Iterable[RetryAttempt],
     probe_code: Callable[[RetryAttempt], str],
 ) -> RetryOutcome:
-    """Execute retry stages until a probe succeeds; verifier feedback is a Phase 4 TODO."""
+    """Execute retry stages until a probe succeeds."""
     attempted: list[RetryAttempt] = []
     for attempt in attempts:
-        # TODO(phase-4): replace this exit-code gate with Fidelity Verifier feedback.
         result = runtime.run_code(sandbox_id, probe_code(attempt))
         attempted.append(attempt)
         if result["exit_code"] == 0:
@@ -344,7 +469,10 @@ def run_retry_loop(
 
 
 def _dependency_stub(entry: DepEntry) -> DependencyStub:
-    """Declare every relevant Assayer uncertainty parameter for one dependency type."""
+    """Declare Assayer uncertainty parameters for one dependency type."""
+    plan = stub_plan(DependencyLedger(entries=[entry]))
+    if plan.stubs:
+        return _planned_to_dependency_stub(plan.stubs[0])
     io_parameters = {
         "latency_ms": UncertaintySpec(5, "log-uniform [2 ms, 20 ms]"),
         "cold_cache_probability": UncertaintySpec(0.0, "uniform [0.0, 0.3]"),
@@ -399,9 +527,7 @@ def _default_config(knobs: list[Knob]) -> dict[str, Any]:
 
 def _assert_module_path_is_only_difference(base_source: str, head_source: str) -> None:
     """Enforce structural symmetry before a pair can reach Fidelity Verifier."""
-    normalised_base = _normalise_module_path(base_source)
-    normalised_head = _normalise_module_path(head_source)
-    if normalised_base != normalised_head:
+    if _normalise_module_path(base_source) != _normalise_module_path(head_source):
         raise AssertionError("Harnesses differ in more than their imported module path")
 
 
@@ -417,8 +543,12 @@ def _normalise_module_path(source: str) -> str:
 def _innermost_target(scoped_change_set: ScopedChangeSet, fallback: str) -> str:
     """Choose Scout's deepest named changed/reachable node for retry attempt three."""
     candidates = [
-        node for node in (*scoped_change_set.changed_nodes, *scoped_change_set.reachable_nodes) if node.name
+        node
+        for node in (*scoped_change_set.changed_nodes, *scoped_change_set.reachable_nodes)
+        if node.name
     ]
     if not candidates:
         return fallback
-    return min(candidates, key=lambda node: (node.end_byte - node.start_byte, -node.start_byte)).name or fallback
+    return min(
+        candidates, key=lambda node: (node.end_byte - node.start_byte, -node.start_byte)
+    ).name or fallback

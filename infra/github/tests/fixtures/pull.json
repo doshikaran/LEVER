@@ -1,0 +1,15 @@
+{
+  "html_url": "https://github.com/acme/widgets/pull/7",
+  "title": "Sliding window limiter",
+  "base": {
+    "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ref": "main",
+    "repo": {
+      "clone_url": "https://github.com/acme/widgets.git"
+    }
+  },
+  "head": {
+    "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "ref": "feature/limiter"
+  }
+}

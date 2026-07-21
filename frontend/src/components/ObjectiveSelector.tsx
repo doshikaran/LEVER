@@ -70,12 +70,20 @@ export function ObjectiveSelector({ controls, observableId, disabled = false, on
           className="rounded border border-[var(--lever-primary)] bg-[var(--lever-background)] px-2 py-1"
         >
           <option value="max_divergence">Maximize divergence</option>
+          <option value="max_path_divergence">Maximize path divergence</option>
           <option value="reach_unsafe_state">Reach unsafe state</option>
         </select>
       </label>
+      {objective === 'max_divergence' || objective === 'max_path_divergence' ? (
+        <p className="mt-2 text-xs text-[var(--lever-text)]/80">
+          Searches measured inputs only. Celebration happens only when an empirical unsafe hit is found.
+        </p>
+      ) : null}
       {objective === 'reach_unsafe_state' ? (
         <div className="mt-3 grid gap-2">
-          <p className="text-xs">Searches malformed and boundary inputs for a condition in either version.</p>
+          <p className="text-xs">
+            Searches malformed and boundary inputs. Empty result is honest — no unsafe state found.
+          </p>
           <label className="flex flex-col gap-1">Condition
             <select value={operator} onChange={(event) => setOperator(event.target.value as UnsafePredicate['operator'])} className="rounded border border-[var(--lever-primary)] bg-[var(--lever-background)] px-2 py-1">
               <option value="gt">is greater than</option>

@@ -22,7 +22,7 @@ export function ComposedMicroworld({ config }: ComposedMicroworldProps) {
     <section
       aria-label="Composed microworld"
       data-testid="composed-microworld"
-      className="space-y-4 rounded-lg border border-[var(--lever-text)]/20 bg-[var(--lever-surface)] p-4 shadow-sm"
+      className="lever-panel space-y-4 rounded-2xl p-4"
     >
       <header>
         <h2 className="text-base font-semibold text-[var(--lever-text)]">Composed microworld</h2>

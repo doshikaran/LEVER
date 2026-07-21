@@ -13,11 +13,14 @@ from domain.fidelity_verifier import FidelityVerification, FidelityVerifier
 from domain.harness_engineer import (
     HarnessEngineer,
     NO_HARNESS_TEMPLATE_REASON,
+    GenerativeHarnessError,
+    GENERATIVE_HARNESS_FAILED_REASON,
     NoHarnessTemplateRegistered,
     UnsupportedTemplateProposal,
 )
 from domain.line_attribution import UninstrumentableReferenceError
 from domain.ports import LLMClient, SandboxRuntime
+from domain.intake import CheckoutHandle
 from domain.schema import InteractionSpec, Provenance
 from domain.scout import scout
 from domain.synthesizer import synthesize
@@ -30,6 +33,15 @@ MAX_LOOP_B_KICKBACKS = 1
 MAX_PROPOSAL_RESELECTION_KICKBACKS = 1
 _SANDBOX_BASE_MODULE = "/tmp/lever-pipeline/base.py"
 _SANDBOX_HEAD_MODULE = "/tmp/lever-pipeline/head.py"
+
+
+@dataclass(frozen=True)
+class RepoProvenance:
+    """Optional hosting-provider facts when intake already resolved a PR."""
+
+    repo_url: str
+    base_sha: str
+    head_sha: str
 
 
 @dataclass(frozen=True)
@@ -76,6 +88,56 @@ class SkippedResult(DegradeResult):
     kind: Literal["skipped"] = field(init=False, default="skipped")
 
 
+def run_pipeline_from_checkout(
+    checkout: CheckoutHandle,
+    sandbox: SandboxRuntime,
+    llm: LLMClient,
+    model: str,
+    reasoning_effort: str,
+    progress_callback: Callable[[str, str], None] | None = None,
+    adversary_callback: Callable[[AdversaryResult], None] | None = None,
+    search_trace_callback: Callable[[TracePoint], None] | None = None,
+    speculative: bool = False,
+) -> InteractionSpec | DegradeResult:
+    """Run the existing single-pair pipeline against a Phase A dual checkout."""
+    resolved = checkout.resolved
+    _emit_progress(
+        progress_callback,
+        "intake",
+        f"Checked out {resolved.owner}/{resolved.repo}#{resolved.number} — "
+        f"{len(resolved.changed_files)} changed files.",
+    )
+    if checkout.primary_base_file is None or checkout.primary_head_file is None:
+        return GracefulDegradation(
+            checkout.selection_reason
+            or "No shared Python module was available on both base and head.",
+            plain_explanation=(
+                f"{resolved.title} changed files, but Lever Phase A needs one shared "
+                "Python module present on both sides of the PR before it can verify."
+            ),
+        )
+    if checkout.selection_reason:
+        _emit_progress(progress_callback, "primary_pair", checkout.selection_reason)
+    return run_pipeline(
+        str(checkout.primary_base_file),
+        str(checkout.primary_head_file),
+        sandbox,
+        llm,
+        model,
+        reasoning_effort,
+        progress_callback=progress_callback,
+        adversary_callback=adversary_callback,
+        search_trace_callback=search_trace_callback,
+        speculative=speculative,
+        repo_provenance=RepoProvenance(
+            repo_url=resolved.repo_url,
+            base_sha=resolved.base_sha,
+            head_sha=resolved.head_sha,
+        ),
+        files_touched_count=max(1, len(resolved.changed_files)),
+    )
+
+
 def run_pipeline(
     base_file_path: str,
     head_file_path: str,
@@ -87,6 +149,8 @@ def run_pipeline(
     adversary_callback: Callable[[AdversaryResult], None] | None = None,
     search_trace_callback: Callable[[TracePoint], None] | None = None,
     speculative: bool = False,
+    repo_provenance: RepoProvenance | None = None,
+    files_touched_count: int = 1,
 ) -> InteractionSpec | DegradeResult:
     """Execute Part 5 and optionally publish real-time search evidence."""
     base_path = Path(base_file_path)
@@ -105,9 +169,10 @@ def run_pipeline(
     triage_verdict = triage(base_source, head_source, [head_path.name])
     if not triage_verdict.proceed:
         return SkippedResult(triage_verdict.reason or "Triager skipped this change.")
+    touched = max(1, files_touched_count)
     emit_progress(
         "files_touched",
-        "1 file touched.",
+        f"{touched} file{'s' if touched != 1 else ''} touched.",
     )
 
     parser = TreeSitterPythonParser()
@@ -188,7 +253,22 @@ def run_pipeline(
                         proposedSpecs=tuple(proposed_specs),
                         registryCompatibilityKickbacks=registryCompatibilityKickbacks,
                     )
+                except GenerativeHarnessError as error:
+                    if loop_a_attempt < MAX_LOOP_A_ATTEMPTS:
+                        continue
+                    return GracefulDegradation(
+                        str(error),
+                        plain_explanation=_plain_explanation(
+                            partial_spec.thesis,
+                            f"{scoped_change_set.entry_point.fn} with plain-data inputs",
+                        ),
+                        loop_a_attempts=loop_a_attempt,
+                        proposedSpecs=tuple(proposed_specs),
+                        registryCompatibilityKickbacks=registryCompatibilityKickbacks,
+                    )
                 except NoHarnessTemplateRegistered:
+                    # Phase B: registry miss should already fall through to generative.
+                    # Keep this branch for unexpected raise sites.
                     return GracefulDegradation(
                         NO_HARNESS_TEMPLATE_REASON,
                         plain_explanation=(
@@ -222,7 +302,7 @@ def run_pipeline(
                             base_source,
                             head_source,
                         )
-                    except (NoHarnessTemplateRegistered, UnsupportedTemplateProposal, ValueError) as fallback_error:
+                    except (NoHarnessTemplateRegistered, UnsupportedTemplateProposal, GenerativeHarnessError, ValueError) as fallback_error:
                         return GracefulDegradation(
                             "Registered-template compatibility failed after one "
                             "Delta Analyst kickback, and the numeric-fn fallback "
@@ -359,6 +439,7 @@ def run_pipeline(
                     reasoning_effort,
                     registryCompatibilityKickbacks,
                     speculative,
+                    repo_provenance,
                 ),
             )
             # Step 40: Synthesizer validates/mechanically materializes the complete spec.
@@ -429,12 +510,21 @@ def _provenance(
     reasoning_effort: str,
     registryCompatibilityKickbacks: int,
     speculative: bool = False,
+    repo_provenance: RepoProvenance | None = None,
 ) -> Provenance:
     """Populate Orchestrator-owned provenance facts before the completed spec returns."""
+    if repo_provenance is not None:
+        base_sha = repo_provenance.base_sha
+        head_sha = repo_provenance.head_sha
+        repo_url = repo_provenance.repo_url
+    else:
+        base_sha = hashlib.sha256(base_source.encode("utf-8")).hexdigest()
+        head_sha = hashlib.sha256(head_source.encode("utf-8")).hexdigest()
+        repo_url = f"file://{head_path.parent}"
     return Provenance(
-        baseSha=hashlib.sha256(base_source.encode("utf-8")).hexdigest(),
-        headSha=hashlib.sha256(head_source.encode("utf-8")).hexdigest(),
-        repoUrl=f"file://{head_path.parent}",
+        baseSha=base_sha,
+        headSha=head_sha,
+        repoUrl=repo_url,
         generatedAt=datetime.now(UTC).isoformat(),
         modelIds={"delta-analyst": f"{model}; reasoning={reasoning_effort}"},
         harnessSourceUri=f"sandbox://{sandbox_id}/lever-pipeline",
@@ -447,7 +537,9 @@ __all__ = [
     "DegradeResult",
     "GracefulDegradation",
     "InertResult",
+    "RepoProvenance",
     "SkippedResult",
     "UnscopableResult",
     "run_pipeline",
+    "run_pipeline_from_checkout",
 ]

@@ -59,6 +59,28 @@ export type SourceFile = Readonly<{
 
 export type SourceFiles = Readonly<Partial<Record<'base' | 'head', SourceFile>>>
 
+export type WorldGenre =
+  | 'throughput'
+  | 'access-matrix'
+  | 'decision-path'
+  | 'retry-storm'
+  | 'state-workflow'
+  | 'numeric-response'
+  | 'queue-backlog'
+  | 'cache-efficiency'
+  | 'custom'
+
+export type WorldSpec = Readonly<{
+  genre: WorldGenre
+  stage: Readonly<{
+    kind: 'arena' | 'matrix' | 'tree' | 'curve' | 'workflow'
+    layout: 'full-bleed' | 'split' | 'stacked'
+  }>
+  affordances: readonly string[]
+  narrationLine: string
+  playHints: readonly string[]
+}>
+
 export type WidgetConfig = Readonly<{
   domainPack: string
   thesis: string
@@ -85,6 +107,7 @@ export type WidgetConfig = Readonly<{
     }>[]
     forkTag: string | null
   }> | null
+  worldSpec: WorldSpec
   initialPosition: KnobPosition
   surpriseMarker: Readonly<{
     position: KnobPosition
@@ -194,4 +217,7 @@ export type DegradationEvent = Readonly<{
   plainExplanation: string
   divergenceReport: readonly DivergenceReportEntry[]
   positionCache: Record<string, ObservationBundle>
+  manualTestRecipe?: readonly string[]
+  staticNotes?: readonly string[]
+  proposedSpecs?: readonly Readonly<Record<string, unknown>>[]
 }>

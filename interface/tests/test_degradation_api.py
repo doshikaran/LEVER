@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 import domain.orchestrator as orchestrator
 from domain.fidelity_verifier import DifferentialMismatch, FidelityVerification
 from domain.harness_engineer import HarnessEngineer as RealHarnessEngineer
+from domain.orchestrator import GracefulDegradation
 from domain.schema import (
     Agreement,
     Coverage,
@@ -315,23 +316,26 @@ def test_raw_diff_without_repository_context_never_starts_pipeline(tmp_path) -> 
     assert invoked is False
 
 
-def test_no_executable_reference_fixture_never_starts_pipeline(tmp_path) -> None:
-    """A repository without a test/reference path exits at the verifier precondition."""
+def test_missing_tests_directory_still_starts_pipeline_in_phase_b(tmp_path) -> None:
+    """Phase B uses direct reference programs; a tests/ tree is no longer a hard gate."""
     invoked = False
 
-    def never_run(*_args) -> None:
+    def scripted_runner(*_args, **_kwargs):
         nonlocal invoked
         invoked = True
-        raise AssertionError("missing reference must not call run_pipeline")
+        return GracefulDegradation(
+            "Phase B reached the pipeline without a tests/ directory.",
+            plain_explanation="Direct reference is generated beside the harness.",
+        )
 
     app = create_app(
         repository=SQLiteRepository(tmp_path / "reference.sqlite3"),
         runtime_factory=FakeSandboxRuntime,
         llm_factory=lambda _model, _effort: FakeLLMClient([]),
-        pipeline_runner=never_run,
+        pipeline_runner=scripted_runner,
     )
     with TestClient(app) as client:
         terminal = _submit_and_receive(client, "no_reference")
 
-    _assert_degraded_payload(terminal, kind="degraded", reason_fragment="no executable reference")
-    assert invoked is False
+    assert invoked is True
+    _assert_degraded_payload(terminal, kind="degraded", reason_fragment="Phase B reached the pipeline")
