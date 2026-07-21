@@ -2,7 +2,7 @@
 
 import pytest
 
-from domain.prospective import CandidateGenerationError, generate_candidate
+from domain.prospective import CandidateGenerationError, generate_candidate, generate_candidates
 from infra.fakes.fake_llm import FakeLLMClient
 
 
@@ -79,3 +79,26 @@ class RateLimiter:
     )
 
     assert result.hypothesis_caveat is None
+
+
+def test_generate_candidates_returns_exactly_three() -> None:
+    """Spec §6.2 requires 3 independently-sampled candidates rendered together."""
+    llm = FakeLLMClient(responses=[
+        {"source": "def f(): return 1", "summary": "s1"},
+        {"source": "def f(): return 2", "summary": "s2"},
+        {"source": "def f(): return 3", "summary": "s3"},
+    ])
+    candidates = generate_candidates(llm, "def f(): return 0", "make it return something else")
+    assert len(candidates) == 3
+    assert len({candidate.source for candidate in candidates}) == 3  # genuinely distinct
+
+
+def test_generate_candidates_calls_generate_candidate_count_times() -> None:
+    """Each candidate is one independent LLM completion, not one call fanned out."""
+    llm = FakeLLMClient(responses=[
+        {"source": "def f(): return 1", "summary": "s1"},
+        {"source": "def f(): return 2", "summary": "s2"},
+    ])
+    candidates = generate_candidates(llm, "def f(): return 0", "vary it", count=2)
+    assert len(candidates) == 2
+    assert len(llm.prompts) == 2

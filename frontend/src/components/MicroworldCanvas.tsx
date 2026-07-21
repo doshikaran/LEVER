@@ -81,3 +81,38 @@ export function MicroworldCanvas(props: CanvasProps) {
     ? <ProspectiveMicroworld {...props} />
     : <VerifiedMicroworld {...props} />
 }
+
+/** One independently-generated prospective candidate's display inputs. */
+export type ProspectiveCandidateView = Readonly<{
+  key: string
+  title: string
+  divergence: number
+  data: readonly HonestChartDatum[]
+  widget: WidgetConfig
+}>
+
+/**
+ * Render spec §6.2's 3 LLM-generated candidates side by side against the
+ * current baseline. Reuses ProspectiveMicroworld once per candidate — the
+ * same speculative-only rendering boundary MicroworldCanvas enforces for one
+ * candidate applies independently to each of the N candidates here; there is
+ * no shared or aggregate state that could let any of them slip through the
+ * verified branch.
+ */
+export function ProspectiveCandidateRow({ candidates }: { candidates: readonly ProspectiveCandidateView[] }) {
+  if (candidates.length === 0) return null
+  return (
+    <div className="flex flex-wrap gap-4" data-testid="prospective-candidate-row">
+      {candidates.map((candidate) => (
+        <div key={candidate.key} className="min-w-0 flex-1 basis-64">
+          <ProspectiveMicroworld
+            widget={candidate.widget}
+            title={candidate.title}
+            divergence={candidate.divergence}
+            data={candidate.data}
+          />
+        </div>
+      ))}
+    </div>
+  )
+}

@@ -170,6 +170,31 @@ export type CompleteEvent = Readonly<{
   sourceFiles: SourceFiles
 }>
 
+/**
+ * One of the 3 independently-generated, independently-verified prospective
+ * candidates (spec §6.2). Shares _terminal_payload's shape: either a
+ * complete result (widgetConfig present) or a degraded one (widgetConfig
+ * absent) — a candidate's own verification pipeline can fail on its own,
+ * independently of the other 2.
+ */
+export type ProspectiveCandidateResult = Readonly<{
+  type: string
+  changeId: string
+  thesis: string
+  widgetConfig?: WidgetConfig
+  positionCache?: Record<string, ObservationBundle>
+  sourceFiles?: SourceFiles
+  degradeReason?: string
+  plainExplanation?: string
+}>
+
+/** The prospective completion event: 3 candidates rendered together, not 1. */
+export type ProspectiveCompleteEvent = Readonly<{
+  type: 'complete'
+  changeId: string
+  candidates: readonly ProspectiveCandidateResult[]
+}>
+
 export type EvaluationEvent = Readonly<{
   type: 'evaluation'
   requestId: string

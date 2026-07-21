@@ -21,7 +21,7 @@ from domain.line_attribution import trace_attribution
 from domain.orchestrator import DegradeResult, GracefulDegradation
 from domain.ports import LLMClient, Repository, SandboxRuntime
 from domain.pin_as_test import write_pinned_head_test
-from domain.prospective import CandidateGenerationError, generate_candidate
+from domain.prospective import CandidateGenerationError, GeneratedCandidate, generate_candidates
 from domain.schema import (
     InteractionSpec,
     AdversaryObjective,
@@ -541,6 +541,9 @@ async def _run_in_background(
     )
 
 
+_PROSPECTIVE_CANDIDATE_COUNT = 3
+
+
 async def _run_prospective_in_background(
     state: _RunState,
     hypothesis: str,
@@ -552,25 +555,51 @@ async def _run_prospective_in_background(
     model: str,
     reasoning_effort: str,
 ) -> None:
-    """Create one durable candidate, then reuse the existing pipeline unchanged."""
+    """Create 3 durable candidates, verifying each independently through the unchanged pipeline.
+
+    Spec §6.2 requires 3 LLM-generated candidates rendered together against the
+    current baseline, not 1. Each candidate is written to its own indexed file
+    and run through the exact same single-candidate verification pipeline
+    (Scout -> Delta Analyst -> Harness Engineer -> Fidelity Verifier ->
+    Adversary) that a single candidate always went through; nothing about that
+    pipeline itself changes, it is simply invoked once per candidate. Each of
+    the 3 results is persisted under its own ledger key
+    (f"{change_id}::candidate-{i}") so the Session Ledger can list them
+    individually, and the combined `{"candidates": [...]}` payload is what is
+    saved under the plain change_id and delivered as the terminal WebSocket
+    event.
+    """
     loop = asyncio.get_running_loop()
 
     def on_progress(stage: str, message: str) -> None:
         loop.call_soon_threadsafe(state.add_progress, stage, message)
 
-    def on_adversary(result: AdversaryResult) -> None:
-        loop.call_soon_threadsafe(state.set_adversary_result, result)
-
     def on_search_trace(trace_point: TracePoint) -> None:
         loop.call_soon_threadsafe(state.add_search_trace_point, trace_point)
 
-    def invoke() -> InteractionSpec | DegradeResult:
-        llm = llm_factory(model, reasoning_effort)
-        candidate = generate_candidate(llm, state.base_path.read_text(), hypothesis)
+    def run_one_candidate(
+        index: int,
+        candidate: GeneratedCandidate,
+        llm: LLMClient,
+    ) -> dict[str, Any]:
+        """Verify one already-generated candidate exactly as the single-candidate flow did.
+
+        Each candidate gets its own isolated position cache (mirroring
+        _run_hero_pipeline's pattern) so 3 independent Adversary searches never
+        clobber one another's persisted observations.
+        """
         candidate_directory.mkdir(parents=True, exist_ok=True)
-        candidate_path = candidate_directory / f"{state.change_id}.py"
+        candidate_path = candidate_directory / f"{state.change_id}-candidate-{index}.py"
         candidate_path.write_text(candidate.source, encoding="utf-8")
-        state.head_path = candidate_path
+        candidate_position_cache: dict[str, dict[str, Any]] = {}
+
+        def on_adversary(result: AdversaryResult) -> None:
+            candidate_position_cache.update(_cache_from_adversary(result))
+            # Also mirrored onto the shared session state so the websocket's
+            # post-completion evaluate/pin protocol (designed for one active
+            # spec) has cache data to serve against the last candidate run.
+            loop.call_soon_threadsafe(state.set_adversary_result, result)
+
         result = pipeline_runner(
             str(state.base_path),
             str(candidate_path),
@@ -586,7 +615,7 @@ async def _run_prospective_in_background(
         # prospective discriminator or named-concept caveat before rendering or
         # persistence.
         if isinstance(result, InteractionSpec):
-            return result.model_copy(
+            result = result.model_copy(
                 update={
                     "provenance": result.provenance.model_copy(
                         update={
@@ -596,10 +625,36 @@ async def _run_prospective_in_background(
                     )
                 }
             )
-        return result
+            # The first successfully-verified candidate becomes the "active"
+            # spec for any post-completion live evaluate/pin request the
+            # client sends — that protocol was designed around one spec.
+            if state.spec is None:
+                state.spec = result
+                state.head_path = candidate_path
+
+        candidate_change_id = f"{state.change_id}::candidate-{index}"
+        payload = _terminal_payload(
+            candidate_change_id,
+            result,
+            candidate_position_cache,
+            _source_files(state.base_path, candidate_path),
+        )
+        repository.save(candidate_change_id, payload)
+        return payload
+
+    def invoke() -> list[dict[str, Any]]:
+        llm = llm_factory(model, reasoning_effort)
+        base_source = state.base_path.read_text()
+        candidates = generate_candidates(
+            llm, base_source, hypothesis, count=_PROSPECTIVE_CANDIDATE_COUNT
+        )
+        return [
+            run_one_candidate(index, candidate, llm)
+            for index, candidate in enumerate(candidates)
+        ]
 
     try:
-        result = await asyncio.to_thread(invoke)
+        payloads = await asyncio.to_thread(invoke)
     except CandidateGenerationError as error:
         _persist_terminal(
             state,
@@ -629,31 +684,14 @@ async def _run_prospective_in_background(
         )
         return
 
-    if isinstance(result, InteractionSpec):
-        state.spec = result
-        _persist_terminal(
-            state,
-            repository,
-            _terminal_payload(
-                state.change_id,
-                result,
-                state.position_cache,
-                _source_files(state.base_path, state.head_path),
-            ),
-        )
-        return
-
     _persist_terminal(
         state,
         repository,
-        _terminal_payload(
-            state.change_id,
-            result,
-            state.position_cache,
-            _source_files(state.base_path, state.head_path)
-            if state.head_path != state.base_path
-            else None,
-        ),
+        {
+            "type": "complete",
+            "changeId": state.change_id,
+            "candidates": payloads,
+        },
     )
 
 

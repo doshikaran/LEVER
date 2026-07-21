@@ -61,6 +61,23 @@ def generate_candidate(
     return candidate
 
 
+def generate_candidates(
+    llm: LLMClient,
+    current_source: str,
+    hypothesis: str,
+    count: int = 3,
+) -> tuple[GeneratedCandidate, ...]:
+    """Generate `count` independently-sampled candidates for one hypothesis.
+
+    Spec §6.2 requires 3 LLM-generated candidates rendered together against the
+    current baseline, not 1. Each call to generate_candidate() is independent;
+    a model may legitimately return the same source twice for a simple
+    hypothesis, and that is reported honestly rather than papered over with an
+    artificial-diversity retry.
+    """
+    return tuple(generate_candidate(llm, current_source, hypothesis) for _ in range(count))
+
+
 def _hypothesis_caveat(
     hypothesis: str,
     parsed_source: ast.AST,

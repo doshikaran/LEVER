@@ -397,23 +397,30 @@ def test_websocket_objective_search_streams_boundary_trace_and_retains_new_cache
     repository.close()
 
 
-def test_prospective_intake_persists_one_generated_source_and_forces_speculative_provenance(
+def _rate_limiter_candidate_source(admit_body: str) -> str:
+    """Build one distinct rate-limiter candidate module for a 3-candidate test."""
+    return (
+        "class RateLimiter:\n"
+        "    def __init__(self, limit_per_sec: int):\n"
+        "        self.limit = limit_per_sec\n"
+        "        self.windows = {}\n"
+        "\n"
+        "    def admit(self, tenant_id: str, now: float) -> bool:\n"
+        f"        {admit_body}\n"
+    )
+
+
+def test_prospective_intake_persists_three_generated_candidates_and_forces_speculative_provenance(
     tmp_path,
 ) -> None:
-    """Current-vs-candidate reuses the normal pipeline while retaining the generated head."""
+    """Current-vs-candidate reuses the normal pipeline, once per independent candidate (spec §6.2)."""
     base = tmp_path / "current.py"
     base.write_text("class RateLimiter:\n    pass\n")
-    candidate_source = """\
-class RateLimiter:
-    def __init__(self, limit_per_sec: int):
-        self.limit = limit_per_sec
-        self.windows = {}
-
-    def admit(self, tenant_id: str, now: float) -> bool:
-        count = self.windows.get(tenant_id, 0)
-        self.windows[tenant_id] = count + 1
-        return count < self.limit
-"""
+    candidate_sources = [
+        _rate_limiter_candidate_source("return True"),
+        _rate_limiter_candidate_source("return False"),
+        _rate_limiter_candidate_source("return now > 0"),
+    ]
     candidate_dir = tmp_path / "candidates"
     calls: list[tuple[str, str]] = []
 
@@ -429,7 +436,6 @@ class RateLimiter:
         search_trace_callback,
     ) -> InteractionSpec:
         calls.append((base_path, head_path))
-        assert Path(head_path).read_text() == candidate_source
         return _spec()
 
     repository = SQLiteRepository(tmp_path / "prospective.sqlite3")
@@ -437,7 +443,10 @@ class RateLimiter:
         repository=repository,
         runtime_factory=lambda: object(),
         llm_factory=lambda _model, _effort: FakeLLMClient(
-            [{"source": candidate_source, "summary": "Returns candidate behavior."}]
+            [
+                {"source": source, "summary": f"Candidate {index}."}
+                for index, source in enumerate(candidate_sources)
+            ]
         ),
         prospective_pipeline_runner=prospective_runner,
         prospective_candidate_dir=candidate_dir,
@@ -455,14 +464,96 @@ class RateLimiter:
         with client.websocket_connect(f"/ws/{change_id}") as websocket:
             terminal = websocket.receive_json()
 
-    assert calls == [(str(base), str(candidate_dir / f"{change_id}.py"))]
+    # Each candidate is independently generated (distinct source) and
+    # independently verified (its own pipeline_runner call, its own file).
+    expected_paths = [
+        str(candidate_dir / f"{change_id}-candidate-{index}.py") for index in range(3)
+    ]
+    assert calls == [(str(base), path) for path in expected_paths]
+    assert [Path(path).read_text() for path in expected_paths] == candidate_sources
+
     assert terminal["type"] == "complete"
-    assert terminal["interactionSpec"]["provenance"]["speculative"] is True
-    assert terminal["widgetConfig"]["speculative"] is True
-    assert "does not retain a burst-related identifier" in terminal["interactionSpec"]["provenance"]["hypothesisCaveat"]
-    assert "does not retain a burst-related identifier" in terminal["widgetConfig"]["hypothesisCaveat"]
-    assert terminal["sourceFiles"]["head"]["source"] == candidate_source
-    assert (candidate_dir / f"{change_id}.py").read_text() == candidate_source
+    candidates = terminal["candidates"]
+    assert len(candidates) == 3
+    for index, candidate in enumerate(candidates):
+        assert candidate["changeId"] == f"{change_id}::candidate-{index}"
+        assert candidate["type"] == "complete"
+        assert candidate["interactionSpec"]["provenance"]["speculative"] is True
+        assert candidate["widgetConfig"]["speculative"] is True
+        assert (
+            "does not retain a burst-related identifier"
+            in candidate["interactionSpec"]["provenance"]["hypothesisCaveat"]
+        )
+        assert (
+            "does not retain a burst-related identifier"
+            in candidate["widgetConfig"]["hypothesisCaveat"]
+        )
+        assert candidate["sourceFiles"]["head"]["source"] == candidate_sources[index]
+        # The Session Ledger (Task 8) can list each candidate individually.
+        assert repository.load(f"{change_id}::candidate-{index}") == candidate
+
+    persisted = repository.load(change_id)
+    assert persisted == terminal
+    repository.close()
+
+
+def test_prospective_never_marks_any_of_three_candidates_as_verified(tmp_path) -> None:
+    """The 'speculative' rendering guard must hold across all 3 candidates, not just the first."""
+    base = tmp_path / "current.py"
+    base.write_text("class RateLimiter:\n    pass\n")
+    candidate_sources = [
+        _rate_limiter_candidate_source("return True"),
+        _rate_limiter_candidate_source("return False"),
+        _rate_limiter_candidate_source("return now > 0"),
+    ]
+    candidate_dir = tmp_path / "candidates"
+
+    def prospective_runner(
+        base_path,
+        head_path,
+        sandbox,
+        llm,
+        model,
+        reasoning_effort,
+        progress_callback,
+        adversary_callback,
+        search_trace_callback,
+    ) -> InteractionSpec:
+        return _spec()
+
+    repository = SQLiteRepository(tmp_path / "prospective.sqlite3")
+    app = create_app(
+        repository=repository,
+        runtime_factory=lambda: object(),
+        llm_factory=lambda _model, _effort: FakeLLMClient(
+            [
+                {"source": source, "summary": f"Candidate {index}."}
+                for index, source in enumerate(candidate_sources)
+            ]
+        ),
+        prospective_pipeline_runner=prospective_runner,
+        prospective_candidate_dir=candidate_dir,
+    )
+    with TestClient(app) as client:
+        accepted = client.post(
+            "/prospective",
+            json={
+                "base_file_path": str(base),
+                "hypothesis": "what if admission changed?",
+            },
+        )
+        change_id = accepted.json()["changeId"]
+        with client.websocket_connect(f"/ws/{change_id}") as websocket:
+            terminal = websocket.receive_json()
+
+    assert len(terminal["candidates"]) == 3
+    assert all(
+        candidate["widgetConfig"]["speculative"] is True for candidate in terminal["candidates"]
+    )
+    assert all(
+        candidate["interactionSpec"]["provenance"]["speculative"] is True
+        for candidate in terminal["candidates"]
+    )
     repository.close()
 
 

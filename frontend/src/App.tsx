@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { MicroworldCanvas } from './components/MicroworldCanvas'
+import { MicroworldCanvas, ProspectiveCandidateRow } from './components/MicroworldCanvas'
+import type { ProspectiveCandidateView } from './components/MicroworldCanvas'
 import { KnobPanel } from './components/KnobPanel'
 import { DegradationPanel } from './components/DegradationPanel'
 import { SourceViewer } from './components/SourceViewer'
@@ -16,6 +17,8 @@ import type {
   ObservationBundle,
   ObjectiveResultEvent,
   ProgressEvent,
+  ProspectiveCandidateResult,
+  ProspectiveCompleteEvent,
   ResponsibleLine,
   SearchTraceEvent,
   SearchTracePoint,
@@ -185,6 +188,7 @@ function App() {
   const [progress, setProgress] = useState<ProgressEvent[]>([])
   const [searchTrace, setSearchTrace] = useState<SearchTracePoint[]>([])
   const [widget, setWidget] = useState<WidgetConfig | null>(null)
+  const [prospectiveCandidates, setProspectiveCandidates] = useState<readonly ProspectiveCandidateResult[] | null>(null)
   const [changeId, setChangeId] = useState<string | null>(null)
   const [degradation, setDegradation] = useState<DegradationEvent | null>(null)
   const [observations, setObservations] = useState<ObservationBundle | null>(null)
@@ -295,6 +299,7 @@ function App() {
     replacePosition(selectedTracePosition.current ?? complete.widgetConfig.initialPosition)
     setDegradation(null)
     setWidget(complete.widgetConfig)
+    setProspectiveCandidates(null)
     setChangeId(complete.changeId)
     setSourceFiles(complete.sourceFiles)
     setObservedPosition(null)
@@ -307,9 +312,32 @@ function App() {
     setProspectivePending(false)
   }, [replaceCache, replacePosition])
 
+  // Spec §6.2: 3 independently-generated, independently-verified candidates
+  // rendered together against the current baseline, not 1. Each candidate
+  // keeps its own "speculative" widgetConfig (forced true server-side for all
+  // 3 — see interface/api.py's _run_prospective_in_background) so none of
+  // them can render through the verified-only branch MicroworldCanvas uses
+  // for real diffs.
+  const applyProspectiveComplete = useCallback((complete: ProspectiveCompleteEvent) => {
+    setDegradation(null)
+    setWidget(null)
+    setProspectiveCandidates(complete.candidates)
+    setChangeId(complete.changeId)
+    setSourceFiles({})
+    setObservedPosition(null)
+    setSelectedLine(null)
+    setAttributionMessage(null)
+    setPinStatus(null)
+    setEvaluationSource(null)
+    setObjectiveLoading(false)
+    setObjectiveFinding(null)
+    setProspectivePending(false)
+  }, [])
+
   const applyDegradation = useCallback((event: DegradationEvent) => {
     setDegradation(event)
     setWidget(null)
+    setProspectiveCandidates(null)
     setChangeId(null)
     setObservations(null)
     setObservedPosition(null)
@@ -346,7 +374,12 @@ function App() {
         return
       }
       if (event.type === 'complete') {
-        applyComplete(event as CompleteEvent)
+        const complete = event as CompleteEvent | ProspectiveCompleteEvent
+        if ('candidates' in complete && Array.isArray(complete.candidates)) {
+          applyProspectiveComplete(complete)
+        } else {
+          applyComplete(complete as CompleteEvent)
+        }
         return
       }
       if (isDegradationEvent(event)) {
@@ -423,27 +456,30 @@ function App() {
       setProspectivePending(false)
       setError('The WebSocket connection failed.')
     }
-  }, [applyComplete, applyDegradation, putCachedObservation, replaceCache, replacePosition, rejectPendingGridResolvers])
+  }, [applyComplete, applyDegradation, applyProspectiveComplete, putCachedObservation, replaceCache, replacePosition, rejectPendingGridResolvers])
 
   // Load one already-persisted result by changeId — the permalink open path.
-  // Reuses applyComplete/applyDegradation (the same state transitions a live
-  // websocket 'complete'/degradation event drives) so a permalinked
-  // microworld renders through the identical widget code path, not a second
-  // one. Also used directly by the Session Ledger sidebar's onOpen.
+  // Reuses applyComplete/applyProspectiveComplete/applyDegradation (the same
+  // state transitions a live websocket 'complete'/degradation event drives)
+  // so a permalinked microworld renders through the identical widget code
+  // path, not a second one. Also used directly by the Session Ledger
+  // sidebar's onOpen.
   const openChangeId = useCallback(async (targetChangeId: string) => {
     try {
       const response = await fetch(`${API_BASE}/diffs/${encodeURIComponent(targetChangeId)}`)
       if (!response.ok) throw new Error(`Could not load changeId ${targetChangeId} (${response.status}).`)
-      const payload = await response.json() as CompleteEvent | DegradationEvent
-      if (payload.type === 'complete') {
-        applyComplete(payload)
+      const payload = await response.json() as CompleteEvent | ProspectiveCompleteEvent | DegradationEvent
+      if (payload.type === 'complete' && 'candidates' in payload && Array.isArray(payload.candidates)) {
+        applyProspectiveComplete(payload)
+      } else if (payload.type === 'complete') {
+        applyComplete(payload as CompleteEvent)
       } else if (isDegradationEvent(payload)) {
         applyDegradation(payload)
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : `Could not open changeId ${targetChangeId}.`)
     }
-  }, [applyComplete, applyDegradation])
+  }, [applyComplete, applyDegradation, applyProspectiveComplete])
 
   // On first mount: open a changeId named in the URL (the permalink path),
   // and load the Session Ledger sidebar's listing. Runs once; switching
@@ -498,6 +534,7 @@ function App() {
     setProgress([])
     setSearchTrace([])
     setWidget(null)
+    setProspectiveCandidates(null)
     setChangeId(null)
     setDegradation(null)
     setObservations(null)
@@ -563,6 +600,42 @@ function App() {
   const unionTree = widget?.unionTree ?? null
   const values = chart ? chartValues(observations, chart.observableId) : null
   const caption = objectiveFinding ?? (chart ? observationCaption(observations, chart.observableId) : null)
+
+  // Each of spec §6.2's 3 candidates renders from its own persisted
+  // widgetConfig/positionCache/surpriseMarker — none of them share the single
+  // interactive "current position" state (position/observations) the normal
+  // verified diff view above uses, since each is an independent, only
+  // statically-rendered comparison (no per-candidate live knob dragging).
+  const prospectiveCandidateViews = useMemo<readonly ProspectiveCandidateView[]>(() => {
+    if (prospectiveCandidates === null) return []
+    return prospectiveCandidates
+      .filter((candidate): candidate is ProspectiveCandidateResult & { widgetConfig: WidgetConfig } =>
+        candidate.widgetConfig !== undefined)
+      .map((candidate, index) => {
+        const candidateWidget = candidate.widgetConfig
+        const candidateChart = candidateWidget.charts[0]
+        const surprise = candidateWidget.surpriseMarker
+        const cacheEntry = surprise
+          ? Object.values(candidate.positionCache ?? {}).find(
+            (entry) => entry.position !== undefined
+              && canonicalPosition(entry.position) === canonicalPosition(surprise.position),
+          ) ?? null
+          : null
+        const candidateValues = candidateChart ? chartValues(cacheEntry, candidateChart.observableId) : null
+        return {
+          key: candidate.changeId,
+          title: `Candidate ${index + 1}`,
+          divergence: surprise?.divergence ?? candidateValues?.divergence ?? 0,
+          data: candidateValues
+            ? [{ x: 'Current position', base: candidateValues.base, head: candidateValues.head }]
+            : [],
+          widget: candidateWidget,
+        }
+      })
+  }, [prospectiveCandidates])
+  const degradedProspectiveCandidateCount = prospectiveCandidates === null
+    ? 0
+    : prospectiveCandidates.filter((candidate) => candidate.widgetConfig === undefined).length
   const status = useMemo(() => {
     if (objectiveLoading) return 'Searching boundary-weighted adversarial inputs…'
     if (loadingKey) return 'Evaluating this position…'
@@ -646,6 +719,7 @@ function App() {
       setProgress([])
       setSearchTrace([])
       setWidget(null)
+      setProspectiveCandidates(null)
       setDegradation(null)
       setObservations(null)
       setObservedPosition(null)
@@ -697,7 +771,7 @@ function App() {
             {degradation
               ? 'Lever stopped before rendering a toy.'
               : widget?.thesis ?? (prospectivePending
-                ? 'Generating one executable candidate from unwritten code…'
+                ? 'Generating 3 executable candidates from unwritten code…'
                 : 'Preparing the verified comparison…')}
           </p>
           {changeId !== null ? (
@@ -711,7 +785,7 @@ function App() {
           ) : null}
           <form onSubmit={(event) => void submitProspective(event)} className="max-w-3xl rounded-lg border border-blue-700/30 bg-blue-50 p-3 text-slate-900">
             <label htmlFor="prospective-hypothesis" className="block text-sm font-semibold">Prospective hypothesis</label>
-            <p className="mt-1 text-xs">Generate one executable candidate from unwritten code, then compare it with current behavior.</p>
+            <p className="mt-1 text-xs">Generate 3 executable candidates from unwritten code, then compare each with current behavior.</p>
             <div className="mt-2 flex gap-2">
               <input
                 id="prospective-hypothesis"
@@ -721,13 +795,13 @@ function App() {
                 placeholder="What if the burst allowance were per-tenant instead of shared?"
                 className="min-w-0 flex-1 rounded border border-blue-700/40 bg-white px-3 py-2 text-sm"
               />
-              <button type="submit" disabled={!hypothesis.trim()} className="rounded bg-blue-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">Generate candidate</button>
+              <button type="submit" disabled={!hypothesis.trim()} className="rounded bg-blue-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">Generate 3 candidates</button>
             </div>
           </form>
         </header>
 
         <ol aria-label="Analysis progress" className="space-y-1 text-sm text-[var(--lever-text)]">
-          {progress.map((event) => <li key={event.stage}>{event.message}</li>)}
+          {progress.map((event, index) => <li key={`${index}-${event.stage}`}>{event.message}</li>)}
         </ol>
 
         {error ? <p role="alert" className="text-sm text-[var(--lever-warning)]">{error}</p> : null}
@@ -740,6 +814,20 @@ function App() {
             controls={widget?.controls ?? []}
             onSelectPosition={selectSearchPosition}
           />
+        ) : null}
+
+        {!degradation && prospectiveCandidates !== null ? (
+          <section className="space-y-2" data-testid="prospective-candidates-section">
+            <h2 className="text-sm font-semibold">
+              Prospective candidates ({prospectiveCandidateViews.length} of {prospectiveCandidates.length})
+            </h2>
+            <ProspectiveCandidateRow candidates={prospectiveCandidateViews} />
+            {degradedProspectiveCandidateCount > 0 ? (
+              <p className="text-sm text-[var(--lever-warning)]">
+                {degradedProspectiveCandidateCount} candidate(s) did not reach a renderable result.
+              </p>
+            ) : null}
+          </section>
         ) : null}
 
         {!degradation && widget && (unionTree !== null || (chart && values)) ? (
