@@ -16,6 +16,7 @@ from domain.harness_engineer import HarnessPair
 from domain.line_attribution import trace_attribution
 from domain.ports import SandboxRuntime
 from domain.schema import (
+    AbsoluteTolerance,
     Agreement,
     Coverage,
     CvStabilityEstimate,
@@ -95,9 +96,22 @@ class FidelityVerifier:
         head_source: str,
         diff_new_deps: set[str] | None = None,
         diff_removed_deps: set[str] | None = None,
+        tolerance_override: RelativeTolerance | AbsoluteTolerance | ExactTolerance | None = None,
     ) -> FidelityVerification:
         """Verify a pair against real modules, returning concrete mismatch evidence."""
-        tolerance = _report_tolerance(partial_spec.observables)
+        natural_tolerance = _report_tolerance(partial_spec.observables)
+        # An override is only meaningful when it matches the comparator kind the
+        # observable set naturally requires (Loop A's retry escalation always
+        # proposes a widened *relative* epsilon). A purely categorical observable
+        # set has no numeric distance to widen, so an incompatible override is
+        # silently ignored rather than corrupting `_compare_observations`'s
+        # render-driven exact/relative dispatch.
+        tolerance = (
+            tolerance_override
+            if tolerance_override is not None
+            and type(tolerance_override) is type(natural_tolerance)
+            else natural_tolerance
+        )
         symmetry = symmetrist_check(
             _harness_stub_config(harness_pair.harness_a.source, harness_pair),
             _harness_stub_config(harness_pair.harness_b.source, harness_pair),

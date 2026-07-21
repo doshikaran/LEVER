@@ -191,6 +191,58 @@ def test_harness_engineer_declares_uncertainty_for_each_non_pure_dependency() ->
     assert "gc_pause_ms_per_100_ops" in parameters["ctypes.CDLL"]
 
 
+def _scope_with_escalatable_dependencies() -> ScopedChangeSet:
+    """RateLimiter.admit (no symmetric-seeding template exclusions) with a network
+    dependency in the minimal set plus clock/random deps only attempt two forces in.
+
+    Neither `_hero_scope()` (an intentionally-empty pure ledger) nor Hero 2's real
+    Scout-derived ledger (a single `random`-kind entry that `next_delay`'s template
+    always symmetrically seeds, so it can never appear in `stub_config` regardless
+    of retry attempt) can exercise this escalation, so this follows the existing
+    `test_harness_engineer_declares_uncertainty_for_each_non_pure_dependency`
+    pattern of building a synthetic ledger on top of `_hero_scope()` instead.
+    """
+    return _hero_scope().model_copy(
+        update={
+            "dependency_ledger": DependencyLedger(
+                entries=[
+                    DepEntry(name="requests.get", kind="network", depth=1),
+                    DepEntry(name="time.time", kind="clock", depth=1),
+                    DepEntry(name="random.random", kind="random", depth=1),
+                ]
+            )
+        }
+    )
+
+
+def test_retry_attempt_restricts_stubbed_dependencies_to_the_named_set() -> None:
+    """Attempt 1 must not stub a dependency outside its minimal (network/db/native) set."""
+    scope = _scope_with_escalatable_dependencies()
+    spec = _hero_spec()
+    attempts = retry_plan(scope)
+    pair = HarnessEngineer().generate(
+        scope, spec, str(FIXTURE_DIR / "base.py"), str(FIXTURE_DIR / "head.py"),
+        retry_attempt=attempts[0],
+    )
+    stubbed_kinds = {stub.kind for stub in pair.stub_config}
+    assert "clock" not in stubbed_kinds
+    assert "random" not in stubbed_kinds
+    assert "network" in stubbed_kinds
+
+
+def test_retry_attempt_two_forces_clock_and_random_stubs() -> None:
+    """Attempt 2 must widen the stub set to include forced clock/random seeding."""
+    scope = _scope_with_escalatable_dependencies()
+    spec = _hero_spec()
+    attempts = retry_plan(scope)
+    pair = HarnessEngineer().generate(
+        scope, spec, str(FIXTURE_DIR / "base.py"), str(FIXTURE_DIR / "head.py"),
+        retry_attempt=attempts[1],
+    )
+    stubbed_kinds = {stub.kind for stub in pair.stub_config}
+    assert {"clock", "random"} <= stubbed_kinds
+
+
 def test_generated_hero1_harnesses_execute_the_real_fixture_modules() -> None:
     """The registry preserves Hero 1's source bytes and real-module admissions."""
     pair = HarnessEngineer().generate(

@@ -5,12 +5,13 @@ from pathlib import Path
 import domain.orchestrator as orchestrator
 from domain.adversary import AdversaryResult
 from domain.fidelity_verifier import FidelityVerification
-from domain.harness_engineer import HarnessEngineer as RealHarnessEngineer
+from domain.harness_engineer import HarnessEngineer as RealHarnessEngineer, HarnessPair
 from domain.line_attribution import UninstrumentableReferenceError
 from domain.schema import (
     Agreement,
     Coverage,
     CvStabilityEstimate,
+    DepEntry,
     DependencyLedger,
     EntryPoint,
     FidelityReport,
@@ -256,6 +257,90 @@ def _counting_harness(monkeypatch) -> list[int]:
 
     monkeypatch.setattr(orchestrator, "HarnessEngineer", CountingHarnessEngineer)
     return calls
+
+
+def _recording_harness(monkeypatch) -> list[HarnessPair]:
+    """Patch only construction so tests can inspect every real generated harness pair."""
+    calls: list[HarnessPair] = []
+
+    class RecordingHarnessEngineer:
+        def generate(self, *args, **kwargs):
+            pair = RealHarnessEngineer().generate(*args, **kwargs)
+            calls.append(pair)
+            return pair
+
+    monkeypatch.setattr(orchestrator, "HarnessEngineer", RecordingHarnessEngineer)
+    return calls
+
+
+def _clock_dependency_scope() -> ScopedChangeSet:
+    """RateLimiter.admit re-scoped with one clock dependency Loop A can escalate onto.
+
+    Hero 1's real Scout-derived ledger is all-`pure` (no dependency for Loop A to
+    ever escalate), so this test cannot use the fixture's real scout() output
+    directly. `RateLimiter.admit`'s registered template has no
+    `symmetrically_seeded_dependency_kinds`, so a synthetic `clock` entry here is
+    excluded from `stub_config` on attempt 1 (clock is outside the minimal
+    network/db/native set) and forced in on attempt 2 (`seed_clock=True`),
+    giving a real, checkable difference between attempts.
+    """
+    return ScopedChangeSet(
+        entry_point=EntryPoint(
+            file=str(FIXTURE_DIR / "head.py"),
+            fn="RateLimiter.admit",
+            signature="RateLimiter.admit(self, tenant_id: str, now: float) -> bool",
+        ),
+        dependency_ledger=DependencyLedger(
+            entries=[DepEntry(name="time.time", kind="clock", depth=1)]
+        ),
+    )
+
+
+def test_loop_a_retry_actually_escalates_stub_scope_between_attempts(monkeypatch) -> None:
+    """A Symmetrist failure on attempt 1 must produce a DIFFERENT, wider-stubbed harness
+    on attempt 2 — not a byte-identical re-generation of the same pair."""
+    harness_calls = _recording_harness(monkeypatch)
+    monkeypatch.setattr(orchestrator, "scout", lambda *args: _clock_dependency_scope())
+    fidelity_results = [_fidelity(False), _fidelity(True)]
+
+    class ScriptedVerifier:
+        def __init__(self, runtime):
+            pass
+
+        def verify(self, *args, **kwargs):
+            return fidelity_results.pop(0)
+
+    class DivergentAdversary:
+        def __init__(self, runtime):
+            pass
+
+        def search(self, *args, **kwargs):
+            return _divergent_result()
+
+    monkeypatch.setattr(orchestrator, "FidelityVerifier", ScriptedVerifier)
+    monkeypatch.setattr(orchestrator, "Adversary", DivergentAdversary)
+
+    result = orchestrator.run_pipeline(
+        str(FIXTURE_DIR / "base.py"),
+        str(FIXTURE_DIR / "head.py"),
+        FakeSandboxRuntime(),
+        FakeLLMClient([_valid_response()]),
+        "fake-model",
+        "low",
+    )
+
+    assert result.domainPack.value == "rate-limiter"
+    assert len(harness_calls) == 2
+    assert not fidelity_results
+    first_stub_names = {stub.dependency for stub in harness_calls[0].stub_config}
+    second_stub_names = {stub.dependency for stub in harness_calls[1].stub_config}
+    assert second_stub_names != first_stub_names or (
+        # if Hero 1 has no escalatable deps beyond minimal, at minimum the
+        # harness source itself must differ (clock/random seeding changes text)
+        harness_calls[0].harness_a.source != harness_calls[1].harness_a.source
+    )
+    assert first_stub_names == set()
+    assert second_stub_names == {"time.time"}
 
 
 def test_loop_a_reenters_harness_engineer_after_one_scripted_fidelity_failure(monkeypatch) -> None:

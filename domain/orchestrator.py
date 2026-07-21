@@ -15,10 +15,12 @@ from domain.harness_engineer import (
     NO_HARNESS_TEMPLATE_REASON,
     NoHarnessTemplateRegistered,
     UnsupportedTemplateProposal,
+    VerifierFeedback,
+    retry_plan,
 )
 from domain.line_attribution import UninstrumentableReferenceError
 from domain.ports import LLMClient, SandboxRuntime
-from domain.schema import InteractionSpec, Provenance
+from domain.schema import InteractionSpec, Provenance, RelativeTolerance
 from domain.scout import scout
 from domain.synthesizer import synthesize
 from domain.triager import triage
@@ -162,7 +164,14 @@ def run_pipeline(
             )
 
             fidelity = None
+            retry_attempts = retry_plan(scoped_change_set)
+            verifier_feedback = VerifierFeedback()
             for loop_a_attempt in range(1, MAX_LOOP_A_ATTEMPTS + 1):
+                current_attempt = (
+                    retry_attempts[loop_a_attempt - 1]
+                    if loop_a_attempt == 1
+                    else retry_plan(scoped_change_set, verifier_feedback)[loop_a_attempt - 1]
+                )
                 try:
                     harness_pair = HarnessEngineer().generate(
                         scoped_change_set,
@@ -171,6 +180,7 @@ def run_pipeline(
                         _SANDBOX_HEAD_MODULE,
                         base_source,
                         head_source,
+                        retry_attempt=current_attempt,
                     )
                 except UninstrumentableReferenceError as error:
                     if registryCompatibilityKickbacks < MAX_PROPOSAL_RESELECTION_KICKBACKS:
@@ -262,10 +272,17 @@ def run_pipeline(
                     partial_spec,
                     base_source,
                     head_source,
+                    tolerance_override=RelativeTolerance(
+                        kind="relative", epsilon=0.05 if current_attempt.number == 3 else 0.01
+                    ),
                 )
                 report = fidelity.report
                 if not report.symmetrist.passed or report.agreement.rate < 0.85:
-                    # LOOP A: the next iteration re-enters precisely at Harness Engineer.
+                    # LOOP A: the next iteration re-enters precisely at Harness Engineer,
+                    # now with real escalation instead of a byte-identical retry.
+                    verifier_feedback = VerifierFeedback(
+                        implicated_dependencies=tuple(report.symmetrist.unjustifiedKeys)
+                    )
                     continue
                 if report.band == "low" or report.verdict != "verified":
                     return GracefulDegradation(

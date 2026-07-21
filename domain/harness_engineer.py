@@ -129,6 +129,7 @@ class HarnessEngineer:
         head_module_path: str,
         base_source: str | None = None,
         head_source: str | None = None,
+        retry_attempt: RetryAttempt | None = None,
     ) -> HarnessPair:
         """Generate the base/head pair from one template with import path as its sole delta."""
         return build_harness_pair(
@@ -140,6 +141,7 @@ class HarnessEngineer:
             domain_pack=partial_spec.domainPack,
             base_source=base_source,
             head_source=head_source,
+            retry_attempt=retry_attempt,
         )
 
 
@@ -152,6 +154,7 @@ def build_harness_pair(
     domain_pack: DomainPackId | None = None,
     base_source: str | None = None,
     head_source: str | None = None,
+    retry_attempt: RetryAttempt | None = None,
 ) -> HarnessPair:
     """Build a symmetric pair from the entry point's registered source template."""
     entry_point = scoped_change_set.entry_point
@@ -179,12 +182,24 @@ def build_harness_pair(
     )
     if incompatibility is not None:
         raise UnsupportedTemplateProposal(incompatibility)
+    if retry_attempt is None:
+        allowed_names: set[str] | None = None
+        include_clock = True
+        include_random = True
+    else:
+        allowed_names = set(retry_attempt.stubbed_dependencies)
+        include_clock = retry_attempt.seed_clock
+        include_random = retry_attempt.seed_random
     stubs = tuple(
         _dependency_stub(entry)
         for entry in scoped_change_set.dependency_ledger.entries
-        if (
-            entry.kind != "pure"
-            and entry.kind not in template.symmetrically_seeded_dependency_kinds
+        if entry.kind != "pure"
+        and entry.kind not in template.symmetrically_seeded_dependency_kinds
+        and (
+            allowed_names is None
+            or entry.name in allowed_names
+            or (entry.kind == "clock" and include_clock)
+            or (entry.kind == "random" and include_random)
         )
     )
     driver = _workload_driver(knobs)
