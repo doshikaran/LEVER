@@ -1048,9 +1048,9 @@ function App() {
         <div className="mx-auto grid max-w-6xl gap-8 lg:grid-cols-[minmax(0,1fr)_17rem]">
           <div className="space-y-8">
             <header className="animate-rise space-y-3">
-              <p className="font-display text-4xl font-black tracking-tight text-[var(--lever-text)] sm:text-5xl">
+              {/* <p className="font-display text-4xl font-black tracking-tight text-[var(--lever-text)] sm:text-5xl">
                 Lever
-              </p>
+              </p> */}
               <p className="max-w-2xl text-lg leading-relaxed text-[var(--lever-muted)]">
                 Turn a pull request into a <span className="font-semibold text-[var(--lever-text)]">playable, verified microworld</span>.
                 Paste a PR or try a demo — Lever runs the old and new code on the same inputs and shows you exactly where they diverge.
