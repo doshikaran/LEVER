@@ -1,6 +1,7 @@
 import { HonestChart } from './HonestChart'
 import type { HonestChartDatum } from './HonestChart'
-import type { WidgetConfig } from '../types'
+import { PermissionGrid } from './PermissionGrid'
+import type { ControlDescriptor, KnobPosition, ObservationBundle, WidgetConfig } from '../types'
 
 type CanvasProps = Readonly<{
   widget: WidgetConfig
@@ -8,9 +9,24 @@ type CanvasProps = Readonly<{
   divergence: number
   data: readonly HonestChartDatum[]
   onPointClick?: () => void
+  controls?: readonly ControlDescriptor[]
+  basePosition?: KnobPosition
+  onCellsNeeded?: (positions: readonly KnobPosition[]) => Promise<Record<string, ObservationBundle>>
 }>
 
-function VerifiedMicroworld({ widget, title, divergence, data, onPointClick }: CanvasProps) {
+function VerifiedMicroworld({ widget, title, divergence, data, onPointClick, controls, basePosition, onCellsNeeded }: CanvasProps) {
+  if (widget.charts[0]?.render === 'matrixCell' && controls && basePosition && onCellsNeeded) {
+    return (
+      <section data-testid="verified-microworld" className="space-y-3">
+        <PermissionGrid
+          controls={controls}
+          observableId={widget.charts[0].observableId}
+          basePosition={basePosition}
+          onCellsNeeded={onCellsNeeded}
+        />
+      </section>
+    )
+  }
   return (
     <section data-testid="verified-microworld" className="space-y-3">
       <HonestChart title={title} divergence={divergence} data={data} onPointClick={onPointClick} fidelityBand={widget.fidelityBand} />

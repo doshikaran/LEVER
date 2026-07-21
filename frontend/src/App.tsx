@@ -157,6 +157,7 @@ function App() {
   const [prospectivePending, setProspectivePending] = useState(false)
   const socket = useRef<WebSocket | null>(null)
   const pendingRequests = useRef(new Map<string, PendingRequest>())
+  const pendingGridResolvers = useRef(new Map<string, (observations: ObservationBundle | null) => void>())
   const positionVersion = useRef(0)
   const dragSettleTimer = useRef<number | undefined>(undefined)
   const selectedTracePosition = useRef<KnobPosition | null>(null)
@@ -189,6 +190,38 @@ function App() {
     setLoadingKey(key)
     socket.current.send(JSON.stringify({ type: 'evaluate', requestId, position: nextPosition }))
   }, [])
+
+  // A permission-grid cell's evaluation must not disturb the single "current
+  // position" chart state (observations/observedPosition/loadingKey) that
+  // evaluatePosition above owns, and must not be cancelled by positionVersion
+  // bumps from concurrent knob drags. It reuses the same WebSocket protocol
+  // and cache (so cache hits are shared) but resolves via its own map instead.
+  const evaluateOnePosition = useCallback(async (nextPosition: KnobPosition): Promise<ObservationBundle | null> => {
+    const key = await hashPosition(nextPosition)
+    const cacheHit = useMicroworldStore.getState().cache.get(key)
+    if (cacheHit) return cacheHit
+
+    if (socket.current?.readyState !== WebSocket.OPEN) return null
+    const requestId = crypto.randomUUID()
+    return new Promise<ObservationBundle | null>((resolve) => {
+      pendingGridResolvers.current.set(requestId, resolve)
+      socket.current!.send(JSON.stringify({ type: 'evaluate', requestId, position: nextPosition }))
+    })
+  }, [])
+
+  const evaluateManyPositions = useCallback(async (positions: readonly KnobPosition[]) => {
+    const entries = await Promise.all(
+      positions.map(async (candidatePosition) => {
+        const observations = await evaluateOnePosition(candidatePosition)
+        return [JSON.stringify(candidatePosition), observations] as const
+      }),
+    )
+    const result: Record<string, ObservationBundle> = {}
+    for (const [key, observations] of entries) {
+      if (observations !== null) result[key] = observations
+    }
+    return result
+  }, [evaluateOnePosition])
 
   const connectToChange = useCallback((nextChangeId: string) => {
     socket.current?.close()
@@ -247,6 +280,13 @@ function App() {
       }
       if (event.type === 'evaluation') {
         const evaluation = event as EvaluationEvent
+        const gridResolver = pendingGridResolvers.current.get(evaluation.requestId)
+        if (gridResolver) {
+          pendingGridResolvers.current.delete(evaluation.requestId)
+          putCachedObservation(evaluation.positionKey, evaluation.observations)
+          gridResolver(evaluation.observations)
+          return
+        }
         const pending = pendingRequests.current.get(evaluation.requestId)
         pendingRequests.current.delete(evaluation.requestId)
         putCachedObservation(evaluation.positionKey, evaluation.observations)
@@ -262,6 +302,12 @@ function App() {
       }
       if (event.type === 'evaluation_error') {
         const failed = event as { requestId?: string; error?: string }
+        const gridResolver = pendingGridResolvers.current.get(failed.requestId ?? '')
+        if (gridResolver) {
+          pendingGridResolvers.current.delete(failed.requestId ?? '')
+          gridResolver(null)
+          return
+        }
         pendingRequests.current.delete(failed.requestId ?? '')
         setLoadingKey(null)
         setError(failed.error ?? 'Position evaluation failed.')
@@ -562,6 +608,9 @@ function App() {
                   divergence={values.divergence}
                   data={[{ x: 'Current position', base: values.base, head: values.head }]}
                   onPointClick={openResponsibleLine}
+                  controls={widget.controls}
+                  basePosition={position}
+                  onCellsNeeded={evaluateManyPositions}
                 />
               ) : null}
               {attributionMessage ? <p role="status" className="text-sm text-[var(--lever-text)]">{attributionMessage}</p> : null}
