@@ -243,6 +243,50 @@ def test_retry_attempt_two_forces_clock_and_random_stubs() -> None:
     assert {"clock", "random"} <= stubbed_kinds
 
 
+def test_retry_plan_attempt_two_widens_stub_set_only_via_symmetrist_feedback() -> None:
+    """Prove the `unjustifiedKeys` -> `implicated_dependencies` -> expanded stub set
+    path in isolation from the static `seed_clock`/`seed_random` escalation.
+
+    An `io`-kind dependency is neither in the minimal (network/db/native) set
+    attempt 1 stubs, nor force-included by attempt 2's `seed_clock`/`seed_random`
+    flags (unlike clock/random kinds, which `test_retry_attempt_two_forces_clock_
+    and_random_stubs` already covers and which attempt 2 always seeds regardless
+    of feedback). So an `io`-kind dependency can only enter attempt 2's stub set
+    if its name is present in `VerifierFeedback.implicated_dependencies` — this is
+    the one dependency-kind/scenario that isolates the feedback-threading
+    mechanism itself from the fixed per-attempt escalation flags.
+    """
+    scope = _hero_scope().model_copy(
+        update={
+            "dependency_ledger": DependencyLedger(
+                entries=[DepEntry(name="open", kind="io", depth=1)]
+            )
+        }
+    )
+
+    without_feedback = retry_plan(scope)
+    assert without_feedback[0].stubbed_dependencies == ()
+    assert "open" not in without_feedback[1].stubbed_dependencies
+
+    with_feedback = retry_plan(scope, VerifierFeedback(implicated_dependencies=("open",)))
+    assert with_feedback[0].stubbed_dependencies == ()
+    assert "open" in with_feedback[1].stubbed_dependencies
+
+    # Confirm the effect reaches the actually-generated stub configuration, not
+    # merely the RetryAttempt tuple.
+    spec = _hero_spec()
+    pair_without_feedback = HarnessEngineer().generate(
+        scope, spec, str(FIXTURE_DIR / "base.py"), str(FIXTURE_DIR / "head.py"),
+        retry_attempt=without_feedback[1],
+    )
+    pair_with_feedback = HarnessEngineer().generate(
+        scope, spec, str(FIXTURE_DIR / "base.py"), str(FIXTURE_DIR / "head.py"),
+        retry_attempt=with_feedback[1],
+    )
+    assert pair_without_feedback.stub_config == ()
+    assert {stub.dependency for stub in pair_with_feedback.stub_config} == {"open"}
+
+
 def test_generated_hero1_harnesses_execute_the_real_fixture_modules() -> None:
     """The registry preserves Hero 1's source bytes and real-module admissions."""
     pair = HarnessEngineer().generate(

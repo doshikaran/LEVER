@@ -343,6 +343,116 @@ def test_loop_a_retry_actually_escalates_stub_scope_between_attempts(monkeypatch
     assert second_stub_names == {"time.time"}
 
 
+def _io_dependency_scope() -> ScopedChangeSet:
+    """RateLimiter.admit re-scoped with one `io`-kind dependency that is excluded
+    from both attempt 1's minimal (network/db/native) set AND attempt 2's static
+    `seed_clock`/`seed_random` escalation.
+
+    Unlike `_clock_dependency_scope`'s clock-kind dependency (which attempt 2
+    always force-includes via `seed_clock=True`, regardless of Symmetrist
+    feedback), an `io`-kind dependency can enter attempt 2's stub set ONLY via
+    `VerifierFeedback.implicated_dependencies` — isolating the orchestrator's
+    `unjustifiedKeys` -> `implicated_dependencies` extraction/threading itself
+    from the fixed per-attempt escalation flags that already differ the stub set
+    regardless of what the Symmetrist reports.
+    """
+    return ScopedChangeSet(
+        entry_point=EntryPoint(
+            file=str(FIXTURE_DIR / "head.py"),
+            fn="RateLimiter.admit",
+            signature="RateLimiter.admit(self, tenant_id: str, now: float) -> bool",
+        ),
+        dependency_ledger=DependencyLedger(
+            entries=[DepEntry(name="open", kind="io", depth=1)]
+        ),
+    )
+
+
+def _fidelity_failing_with_unjustified_keys(keys: list[str]) -> FidelityVerification:
+    """A Loop-A retryable Symmetrist failure implicating exactly these dependency names."""
+    return FidelityVerification(
+        FidelityReport(
+            verdict="degraded",
+            symmetrist=SymmetristSummary(
+                passed=False,
+                hashA="",
+                hashB="",
+                unjustifiedKeys=keys,
+            ),
+            agreement=Agreement(
+                samples=0,
+                matched=0,
+                rate=0.0,
+                tolerance=RelativeTolerance(kind="relative", epsilon=0.01),
+            ),
+            stability=Stability(
+                replicates=0,
+                perObservable={"admitted": CvStabilityEstimate(kind="cv", value=0.0)},
+            ),
+            coverage=Coverage(samples=0, strategy="sobol"),
+            confidence=0.0,
+            band="low",
+            degradeReason=f"Symmetrist failed for keys: {', '.join(keys)}",
+        ),
+        (),
+    )
+
+
+def test_loop_a_threads_symmetrist_unjustified_keys_into_next_attempts_stub_set(monkeypatch) -> None:
+    """The orchestrator's extraction of `report.symmetrist.unjustifiedKeys` into
+    `VerifierFeedback(implicated_dependencies=...)` must actually reach attempt
+    2's generated stub set for a dependency name that ONLY that feedback path can
+    add (an `io`-kind dependency, not covered by attempt 2's static clock/random
+    escalation or attempt 1's minimal network/db/native set).
+
+    If the orchestrator's `verifier_feedback = VerifierFeedback(implicated_
+    dependencies=tuple(report.symmetrist.unjustifiedKeys))` line were replaced
+    with an empty `VerifierFeedback()`, `second_stub_names` below would stay
+    `set()` (identical to `first_stub_names`) and this test would fail —
+    confirmed by hand during this fix (see task-3-report.md).
+    """
+    harness_calls = _recording_harness(monkeypatch)
+    monkeypatch.setattr(orchestrator, "scout", lambda *args: _io_dependency_scope())
+    fidelity_results = [
+        _fidelity_failing_with_unjustified_keys(["open"]),
+        _fidelity(True),
+    ]
+
+    class ScriptedVerifier:
+        def __init__(self, runtime):
+            pass
+
+        def verify(self, *args, **kwargs):
+            return fidelity_results.pop(0)
+
+    class DivergentAdversary:
+        def __init__(self, runtime):
+            pass
+
+        def search(self, *args, **kwargs):
+            return _divergent_result()
+
+    monkeypatch.setattr(orchestrator, "FidelityVerifier", ScriptedVerifier)
+    monkeypatch.setattr(orchestrator, "Adversary", DivergentAdversary)
+
+    result = orchestrator.run_pipeline(
+        str(FIXTURE_DIR / "base.py"),
+        str(FIXTURE_DIR / "head.py"),
+        FakeSandboxRuntime(),
+        FakeLLMClient([_valid_response()]),
+        "fake-model",
+        "low",
+    )
+
+    assert result.domainPack.value == "rate-limiter"
+    assert len(harness_calls) == 2
+    assert not fidelity_results
+    first_stub_names = {stub.dependency for stub in harness_calls[0].stub_config}
+    second_stub_names = {stub.dependency for stub in harness_calls[1].stub_config}
+    assert first_stub_names == set()
+    assert second_stub_names == {"open"}
+
+
 def test_loop_a_reenters_harness_engineer_after_one_scripted_fidelity_failure(monkeypatch) -> None:
     """A Symmetrist failure sends the flow to HE attempt two, then it succeeds."""
     harness_calls = _counting_harness(monkeypatch)
