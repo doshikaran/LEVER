@@ -662,6 +662,7 @@ function App() {
                   controls={widget.controls}
                   basePosition={position}
                   onCellsNeeded={evaluateManyPositions}
+                  currentObservation={observations}
                 />
               ) : null}
               {attributionMessage ? <p role="status" className="text-sm text-[var(--lever-text)]">{attributionMessage}</p> : null}

@@ -874,6 +874,144 @@ OBSERVATIONS = {{observable_id: str(discount) for observable_id in {observable_i
 """
 
 
+_STATE_MACHINE_HARNESS_TEMPLATE = """\
+import importlib.util
+import json
+import os
+import sys
+
+MODULE_PATH = __MODULE_PATH__
+ENTRY_POINT = __ENTRY_POINT__
+DEFAULT_CONFIG = __DEFAULT_CONFIG__
+CONFIG_KNOBS = __CONFIG_KNOBS__
+DRIVER_KNOBS = __DRIVER_KNOBS__
+STUB_CONFIG = __STUB_CONFIG__
+OBSERVABLES = __OBSERVABLES__
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location("lever_target", MODULE_PATH)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot import target module from {MODULE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _values(config, knobs):
+    return {
+        knob["param"]: config.get(knob["id"], config.get(knob["param"], knob["default"]))
+        for knob in knobs
+    }
+
+
+def run(config=None, seed=0):
+    config = dict(DEFAULT_CONFIG if config is None else config)
+    driver = _values(config, DRIVER_KNOBS)
+    config_values = _values(config, CONFIG_KNOBS)
+    module = _load_module()
+    entry_callable = module
+    for part in ENTRY_POINT.split("."):
+        entry_callable = getattr(entry_callable, part)
+    entry_code = getattr(entry_callable, "__code__", None)
+    target_module_path = os.path.abspath(MODULE_PATH)
+    executed_lines = set()
+    entry_lines = set()
+    line_hits = {}
+
+    def trace_lines(frame, event, _arg):
+        if event == "line" and os.path.abspath(frame.f_code.co_filename) == target_module_path:
+            executed_lines.add(frame.f_lineno)
+            line_hits[frame.f_lineno] = line_hits.get(frame.f_lineno, 0) + 1
+            if entry_code is not None and frame.f_code is entry_code:
+                entry_lines.add(frame.f_lineno)
+        return trace_lines
+
+    current_state = str(config_values.get("current_state", "red"))
+    event = str(driver.get("event", "timer"))
+    previous_trace = sys.gettrace()
+    sys.settrace(trace_lines)
+    try:
+        result = entry_callable(current_state, event)
+    finally:
+        sys.settrace(previous_trace)
+
+    return {
+        "entry_point": ENTRY_POINT,
+        "driver": driver,
+        "observations": {observable["id"]: result for observable in OBSERVABLES},
+        "stub_config": STUB_CONFIG,
+        "trace": {
+            "file": MODULE_PATH,
+            "executed_lines": sorted(executed_lines),
+            "entry_lines": sorted(entry_lines),
+            "line_hits": {str(line): line_hits[line] for line in sorted(line_hits)},
+        },
+    }
+
+
+if __name__ == "__main__":
+    print(json.dumps(run(), sort_keys=True))
+"""
+
+
+def _state_machine_harness_body(request: HarnessBodyRequest) -> str:
+    """Render the direct ``next_state(current_state, event)`` invocation for the synthetic pack."""
+    replacements = {
+        "__ENTRY_POINT__": json.dumps(request.entry_point_fn),
+        "__DEFAULT_CONFIG__": repr(request.default_config),
+        "__CONFIG_KNOBS__": repr(request.config_knobs),
+        "__DRIVER_KNOBS__": repr(request.driver_knobs),
+        "__STUB_CONFIG__": repr(request.stub_config),
+        "__OBSERVABLES__": repr(request.observables),
+    }
+    source = _STATE_MACHINE_HARNESS_TEMPLATE.replace(
+        "__MODULE_PATH__", json.dumps(request.module_path)
+    )
+    for token, value in replacements.items():
+        source = source.replace(token, value)
+    return source
+
+
+def _state_machine_reference_program(request: ReferenceProgramRequest) -> str:
+    """Run the state-machine's module-level ``next_state`` directly, independent of its harness."""
+    config_knobs = [
+        {"id": knob.id, "param": knob.binding.path, "default": knob.default}
+        for knob in request.knobs
+        if knob.binding.kind == "config"
+    ]
+    driver_knobs = [
+        {"id": knob.id, "param": knob.binding.param, "default": knob.default}
+        for knob in request.knobs
+        if knob.binding.kind == "driver"
+    ]
+    observable_ids = [observable.id for observable in request.observables]
+    return f"""\
+import importlib.util
+import json
+
+config = json.loads({json.dumps(json.dumps(request.point))})
+config_knobs = json.loads({json.dumps(json.dumps(config_knobs))})
+driver_knobs = json.loads({json.dumps(json.dumps(driver_knobs))})
+observable_ids = json.loads({json.dumps(json.dumps(observable_ids))})
+spec = importlib.util.spec_from_file_location("lever_reference", {request.module_path!r})
+if spec is None or spec.loader is None:
+    raise ImportError("Cannot import reference module")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+def values(knobs):
+    return {{item["param"]: config.get(item["id"], config.get(item["param"], item["default"])) for item in knobs}}
+
+config_values = values(config_knobs)
+driver = values(driver_knobs)
+current_state = str(config_values.get("current_state", "red"))
+event = str(driver.get("event", "timer"))
+result = module.next_state(current_state, event)
+OBSERVATIONS = {{observable_id: result for observable_id in observable_ids}}
+"""
+
+
 ENTRY_POINT_REGISTRY: Mapping[str, EntryPointTemplate] = MappingProxyType(
     {
         "RateLimiter.admit": EntryPointTemplate(
@@ -984,6 +1122,27 @@ ENTRY_POINT_REGISTRY: Mapping[str, EntryPointTemplate] = MappingProxyType(
                 require_exact_knob_ids=True,
                 required_observable_render="pathTrace",
                 expected_control_ids=("cohort", "flagState", "cartValue"),
+            ),
+        ),
+        "next_state": EntryPointTemplate(
+            harness_body=_state_machine_harness_body,
+            reference_program=_state_machine_reference_program,
+            proposal_shape=ProposalShape(
+                workload_description="a state-machine transition workload",
+                required_driver_params=("event",),
+                allowed_binding_kinds=frozenset({"driver", "config"}),
+                required_knobs=(
+                    KnobRequirement(
+                        "current_state",
+                        type="enum",
+                        binding_kind="config",
+                        config_path="current_state",
+                    ),
+                    KnobRequirement("event", type="enum", binding_kind="driver"),
+                ),
+                require_exact_knob_ids=True,
+                required_observable_render="nodeState",
+                expected_control_ids=("current_state", "event"),
             ),
         ),
     }

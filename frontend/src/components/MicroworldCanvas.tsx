@@ -1,5 +1,6 @@
 import { HonestChart } from './HonestChart'
 import type { HonestChartDatum } from './HonestChart'
+import { NodeGraph } from './NodeGraph'
 import { PermissionGrid } from './PermissionGrid'
 import type { ControlDescriptor, KnobPosition, ObservationBundle, WidgetConfig } from '../types'
 
@@ -12,9 +13,28 @@ type CanvasProps = Readonly<{
   controls?: readonly ControlDescriptor[]
   basePosition?: KnobPosition
   onCellsNeeded?: (positions: readonly KnobPosition[]) => Promise<Record<string, ObservationBundle>>
+  currentObservation?: ObservationBundle | null
 }>
 
-function VerifiedMicroworld({ widget, title, divergence, data, onPointClick, controls, basePosition, onCellsNeeded }: CanvasProps) {
+/**
+ * Node names come only from what has actually been observed at the current
+ * position — the nodeState observable carries no declared value domain, so
+ * this mechanically derives the visible node set from real base/head output
+ * rather than inventing or hardcoding a hero-specific state list.
+ */
+function statesFromObservation(
+  currentObservation: ObservationBundle | null | undefined,
+  observableId: string,
+): string[] {
+  if (!currentObservation) return []
+  const seen = new Set<string>()
+  for (const value of [currentObservation.base[observableId], currentObservation.head[observableId]]) {
+    if (typeof value === 'string') seen.add(value)
+  }
+  return Array.from(seen).sort()
+}
+
+function VerifiedMicroworld({ widget, title, divergence, data, onPointClick, controls, basePosition, onCellsNeeded, currentObservation }: CanvasProps) {
   if (widget.charts[0]?.render === 'matrixCell' && controls && basePosition && onCellsNeeded) {
     return (
       <section data-testid="verified-microworld" className="space-y-3">
@@ -23,6 +43,18 @@ function VerifiedMicroworld({ widget, title, divergence, data, onPointClick, con
           observableId={widget.charts[0].observableId}
           basePosition={basePosition}
           onCellsNeeded={onCellsNeeded}
+        />
+      </section>
+    )
+  }
+  if (widget.charts[0]?.render === 'nodeState' && currentObservation) {
+    const observableId = widget.charts[0].observableId
+    return (
+      <section data-testid="verified-microworld" className="space-y-3">
+        <NodeGraph
+          states={statesFromObservation(currentObservation, observableId)}
+          baseCurrentState={String(currentObservation.base[observableId])}
+          headCurrentState={String(currentObservation.head[observableId])}
         />
       </section>
     )
