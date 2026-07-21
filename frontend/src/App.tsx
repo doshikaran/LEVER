@@ -43,6 +43,24 @@ const HEROES: readonly HeroConfig[] = [
     base_file_path: requireEnv('VITE_HERO1_BASE_FILE_PATH'),
     head_file_path: requireEnv('VITE_HERO1_HEAD_FILE_PATH'),
   },
+  {
+    id: 'hero2',
+    label: 'Hero 2 — retry backoff',
+    base_file_path: requireEnv('VITE_HERO2_BASE_FILE_PATH'),
+    head_file_path: requireEnv('VITE_HERO2_HEAD_FILE_PATH'),
+  },
+  {
+    id: 'hero3',
+    label: 'Hero 3 — permission check',
+    base_file_path: requireEnv('VITE_HERO3_BASE_FILE_PATH'),
+    head_file_path: requireEnv('VITE_HERO3_HEAD_FILE_PATH'),
+  },
+  {
+    id: 'hero4',
+    label: 'Hero 4 — feature flag',
+    base_file_path: requireEnv('VITE_HERO4_BASE_FILE_PATH'),
+    head_file_path: requireEnv('VITE_HERO4_HEAD_FILE_PATH'),
+  },
 ]
 const DRAG_SETTLE_MS = 120
 
@@ -113,7 +131,8 @@ function isDegradationEvent(event: { type?: unknown }): event is DegradationEven
 }
 
 function App() {
-  const selectedHero = HEROES[0]
+  const [selectedHeroId, setSelectedHeroId] = useState(HEROES[0].id)
+  const selectedHero = HEROES.find((hero) => hero.id === selectedHeroId) ?? HEROES[0]
   const position = useMicroworldStore((state) => state.position)
   const replacePosition = useMicroworldStore((state) => state.replacePosition)
   const replaceCache = useMicroworldStore((state) => state.replaceCache)
@@ -289,6 +308,29 @@ function App() {
     const controller = new AbortController()
     let disposed = false
 
+    // Switching heroes must not leave the previous hero's widget, progress log,
+    // or cached position visible while the new hero's diff is still loading.
+    setProgress([])
+    setSearchTrace([])
+    setWidget(null)
+    setChangeId(null)
+    setDegradation(null)
+    setObservations(null)
+    setObservedPosition(null)
+    setLoadingKey(null)
+    setEvaluationSource(null)
+    setSourceFiles({})
+    setSelectedLine(null)
+    setAttributionMessage(null)
+    setPinStatus(null)
+    setError(null)
+    setObjectiveLoading(false)
+    setObjectiveFinding(null)
+    setProspectivePending(false)
+    selectedTracePosition.current = null
+    replacePosition({})
+    replaceCache(new Map())
+
     async function start() {
       try {
         const response = await fetch(`${API_BASE}/diffs`, {
@@ -311,7 +353,7 @@ function App() {
       controller.abort()
       socket.current?.close()
     }
-  }, [connectToChange, selectedHero])
+  }, [connectToChange, selectedHeroId, selectedHero, replaceCache, replacePosition])
 
   useEffect(() => {
     if (widget === null || degradation !== null || Object.keys(position).length === 0) return
@@ -442,15 +484,28 @@ function App() {
   return (
     <main className="min-h-screen bg-[var(--lever-background)] px-6 py-6 text-[var(--lever-text)]">
       <div className="mx-auto max-w-6xl space-y-6">
+        <nav aria-label="Select hero" className="flex gap-2 p-3">
+          {HEROES.map((hero) => (
+            <button
+              key={hero.id}
+              type="button"
+              aria-pressed={hero.id === selectedHeroId}
+              onClick={() => setSelectedHeroId(hero.id)}
+              className="rounded-md border border-[var(--lever-text)]/30 px-3 py-1.5 text-sm aria-pressed:border-[var(--lever-primary)] aria-pressed:bg-[var(--lever-primary)] aria-pressed:text-[var(--lever-surface)]"
+            >
+              {hero.label}
+            </button>
+          ))}
+        </nav>
         <header className="space-y-2">
-          <p className="text-sm font-medium text-[var(--lever-primary)]">Lever / Hero 1</p>
+          <p className="text-sm font-medium text-[var(--lever-primary)]">Lever / {selectedHero.label}</p>
           <h1 className="text-3xl font-semibold">Pull on the behavioral difference</h1>
           <p className="max-w-3xl text-[var(--lever-text)]">
             {degradation
               ? 'Lever stopped before rendering a toy.'
               : widget?.thesis ?? (prospectivePending
                 ? 'Generating one executable candidate from unwritten code…'
-                : 'Preparing the verified rate-limiter comparison…')}
+                : 'Preparing the verified comparison…')}
           </p>
           <form onSubmit={(event) => void submitProspective(event)} className="max-w-3xl rounded-lg border border-blue-700/30 bg-blue-50 p-3 text-slate-900">
             <label htmlFor="prospective-hypothesis" className="block text-sm font-semibold">Prospective hypothesis</label>

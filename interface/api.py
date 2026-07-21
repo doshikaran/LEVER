@@ -53,6 +53,14 @@ HERO_FIXTURES: dict[str, tuple[Path, Path]] = {
         _PROJECT_ROOT / "fixtures/hero1/base.py",
         _PROJECT_ROOT / "fixtures/hero1/head.py",
     ),
+    "hero2": (
+        _PROJECT_ROOT / "fixtures/hero2/base.py",
+        _PROJECT_ROOT / "fixtures/hero2/head.py",
+    ),
+    "hero3": (
+        _PROJECT_ROOT / "fixtures/hero3/base.py",
+        _PROJECT_ROOT / "fixtures/hero3/head.py",
+    ),
     "hero4": (
         _PROJECT_ROOT / "fixtures/hero4/base.py",
         _PROJECT_ROOT / "fixtures/hero4/head.py",

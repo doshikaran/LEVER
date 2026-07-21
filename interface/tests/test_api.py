@@ -548,6 +548,46 @@ def test_hero_result_is_frozen_without_reinvoking_orchestrator(
     restarted_repository.close()
 
 
+def test_run_hero2_is_registered(tmp_path, monkeypatch) -> None:
+    """Hero 2 is reachable through the pinned-hero endpoint, not just Hero 1/4."""
+    _assert_hero_is_reachable(tmp_path, monkeypatch, "hero2")
+
+
+def test_run_hero3_is_registered(tmp_path, monkeypatch) -> None:
+    """Hero 3 is reachable through the pinned-hero endpoint, not just Hero 1/4."""
+    _assert_hero_is_reachable(tmp_path, monkeypatch, "hero3")
+
+
+def _assert_hero_is_reachable(tmp_path, monkeypatch, hero_id: str) -> None:
+    """Confirm a hero_id is registered in HERO_FIXTURES without invoking real infra."""
+
+    def stub_run_pipeline(
+        base_path,
+        head_path,
+        sandbox,
+        llm,
+        model,
+        reasoning_effort,
+        progress_callback=None,
+        adversary_callback=None,
+        search_trace_callback=None,
+    ) -> InteractionSpec | DegradeResult:
+        return _spec()
+
+    monkeypatch.setattr("domain.orchestrator.run_pipeline", stub_run_pipeline)
+    repository = SQLiteRepository(tmp_path / f"{hero_id}-sessions.sqlite3")
+    app = create_app(
+        repository=repository,
+        runtime_factory=lambda: object(),
+        llm_factory=lambda model, effort: object(),
+    )
+    with TestClient(app) as client:
+        response = client.post(f"/heroes/{hero_id}/run")
+
+    assert response.status_code != 404
+    repository.close()
+
+
 @pytest.mark.parametrize(
     ("terminal_result", "expected_kind"),
     [
