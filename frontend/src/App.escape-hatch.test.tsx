@@ -106,6 +106,11 @@ describe('App escape hatch', () => {
         ok: true,
         json: async () => ({ changeId: complete.changeId }),
       })
+      // App also fetches GET /ledger for the Session Ledger sidebar on mount.
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ entries: [] }),
+      })
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({ testPath: '/repo/pinned_tests/test_lever_trace.py' }),
@@ -119,8 +124,8 @@ describe('App escape hatch', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Pin this' }))
 
     expect(await screen.findByText('Pinned regression test: /repo/pinned_tests/test_lever_trace.py')).toBeTruthy()
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(fetchMock.mock.calls[1]?.[0]).toContain('/diffs/trace-test/pin')
-    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ position: { rps: 3 } })
+    const pinCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/pin'))
+    expect(pinCall?.[0]).toContain('/diffs/trace-test/pin')
+    expect(JSON.parse(String(pinCall?.[1]?.body))).toEqual({ position: { rps: 3 } })
   })
 })

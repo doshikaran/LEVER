@@ -548,6 +548,68 @@ def test_hero_result_is_frozen_without_reinvoking_orchestrator(
     restarted_repository.close()
 
 
+def test_get_ledger_lists_persisted_entries(tmp_path, monkeypatch) -> None:
+    """GET /ledger surfaces every entry the Session Ledger has actually persisted."""
+    database_path = tmp_path / "ledger.sqlite3"
+
+    def spy_run_pipeline(
+        base_path,
+        head_path,
+        sandbox,
+        llm,
+        model,
+        reasoning_effort,
+        progress_callback=None,
+        adversary_callback=None,
+        search_trace_callback=None,
+    ) -> InteractionSpec | DegradeResult:
+        adversary_callback(
+            AdversaryResult(
+                initial_position=KnobPosition({"rps": 3}),
+                surprise_marker=SurpriseMarker(
+                    position=KnobPosition({"rps": 3}),
+                    divergence=0.5,
+                    caption="Head admits twice as many requests.",
+                ),
+                presets=(),
+                search_trace=(),
+                cache=(
+                    CacheEntry(
+                        position=KnobPosition({"rps": 3}),
+                        observations=ObservationBundle(
+                            base={"admitted": 1}, head={"admitted": 2}
+                        ),
+                    ),
+                ),
+                no_divergence=False,
+            )
+        )
+        return _spec()
+
+    monkeypatch.setattr("domain.orchestrator.run_pipeline", spy_run_pipeline)
+
+    repository = SQLiteRepository(database_path)
+    app = create_app(
+        repository=repository,
+        runtime_factory=lambda: object(),
+        llm_factory=lambda model, effort: object(),
+    )
+    with TestClient(app) as client:
+        run_response = client.post("/heroes/hero1/run")
+        assert run_response.status_code == 200
+        listing = client.get("/ledger")
+
+    assert listing.status_code == 200
+    entries = listing.json()["entries"]
+    assert isinstance(entries, list)
+    matching = [entry for entry in entries if entry["changeId"] == "hero:hero1"]
+    assert len(matching) == 1
+    # A real persisted "complete" entry carries a one-line thesis, not an
+    # empty stub — this is what the frontend Session Ledger sidebar displays.
+    assert matching[0]["thesis"] == _spec().thesis
+    repository.close()
+
+
 def test_run_hero2_is_registered(tmp_path, monkeypatch) -> None:
     """Hero 2 is reachable through the pinned-hero endpoint, not just Hero 1/4."""
     _assert_hero_is_reachable(tmp_path, monkeypatch, "hero2")

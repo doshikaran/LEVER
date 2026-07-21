@@ -39,6 +39,20 @@ class SQLiteRepository:
             ).fetchone()
         return None if row is None else json.loads(row[0])
 
+    def list_entries(self) -> list[dict]:
+        """Return every saved document's key + full value, newest first by rowid.
+
+        The Session Ledger is currently small enough (one row per generated
+        microworld this session) that returning full documents is simpler and
+        more honest than maintaining a second summary-only column set that
+        could drift from the real payload.
+        """
+        with self._lock:
+            rows = self._connect().execute(
+                "SELECT value FROM repository_entries ORDER BY rowid DESC"
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
     def close(self) -> None:
         """Close this adapter's database connection without deleting persisted sessions."""
         with self._lock:

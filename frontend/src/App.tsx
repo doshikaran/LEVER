@@ -6,6 +6,7 @@ import { SourceViewer } from './components/SourceViewer'
 import { UnionTree } from './components/UnionTree'
 import { SearchTrace } from './components/SearchTrace'
 import { ObjectiveSelector } from './components/ObjectiveSelector'
+import { SessionLedger } from './components/SessionLedger'
 import { useMicroworldStore } from './store/useMicroworldStore'
 import type {
   CompleteEvent,
@@ -27,6 +28,8 @@ import type {
 const API_BASE = import.meta.env.VITE_LEVER_API_BASE ?? 'http://127.0.0.1:8765'
 
 type HeroConfig = Readonly<{ id: string; label: string; base_file_path: string; head_file_path: string }>
+
+type LedgerEntry = Readonly<{ changeId: string; thesis: string }>
 
 function requireEnv(key: string): string {
   const value = import.meta.env[key]
@@ -187,6 +190,7 @@ function App() {
   const [objectiveFinding, setObjectiveFinding] = useState<string | null>(null)
   const [hypothesis, setHypothesis] = useState('')
   const [prospectivePending, setProspectivePending] = useState(false)
+  const [ledgerEntries, setLedgerEntries] = useState<readonly LedgerEntry[]>([])
   const socket = useRef<WebSocket | null>(null)
   const pendingRequests = useRef(new Map<string, PendingRequest>())
   const pendingGridResolvers = useRef(
@@ -272,6 +276,49 @@ function App() {
     pendingGridResolvers.current.clear()
   }, [])
 
+  // Shared with openChangeId below so a permalink load (GET /diffs/{changeId})
+  // renders through the exact same state transitions as a live websocket
+  // 'complete'/degradation event, rather than a second, possibly-inconsistent
+  // rendering path.
+  const applyComplete = useCallback((complete: CompleteEvent) => {
+    replaceCache(new Map(Object.entries(complete.positionCache)))
+    replacePosition(selectedTracePosition.current ?? complete.widgetConfig.initialPosition)
+    setDegradation(null)
+    setWidget(complete.widgetConfig)
+    setChangeId(complete.changeId)
+    setSourceFiles(complete.sourceFiles)
+    setObservedPosition(null)
+    setSelectedLine(null)
+    setAttributionMessage(null)
+    setPinStatus(null)
+    setEvaluationSource(null)
+    setObjectiveLoading(false)
+    setObjectiveFinding(null)
+    setProspectivePending(false)
+  }, [replaceCache, replacePosition])
+
+  const applyDegradation = useCallback((event: DegradationEvent) => {
+    setDegradation(event)
+    setWidget(null)
+    setChangeId(null)
+    setObservations(null)
+    setObservedPosition(null)
+    setLoadingKey(null)
+    setEvaluationSource(null)
+    setSourceFiles({})
+    setSelectedLine(null)
+    setAttributionMessage(null)
+    setPinStatus(null)
+    setSearchTrace([])
+    selectedTracePosition.current = null
+    replacePosition({})
+    replaceCache(new Map())
+    setError(null)
+    setObjectiveLoading(false)
+    setObjectiveFinding(null)
+    setProspectivePending(false)
+  }, [replaceCache, replacePosition])
+
   const connectToChange = useCallback((nextChangeId: string) => {
     rejectPendingGridResolvers('The evaluation connection was replaced before this position could be evaluated.')
     socket.current?.close()
@@ -289,43 +336,11 @@ function App() {
         return
       }
       if (event.type === 'complete') {
-        const complete = event as CompleteEvent
-        replaceCache(new Map(Object.entries(complete.positionCache)))
-        replacePosition(selectedTracePosition.current ?? complete.widgetConfig.initialPosition)
-        setDegradation(null)
-        setWidget(complete.widgetConfig)
-        setChangeId(complete.changeId)
-        setSourceFiles(complete.sourceFiles)
-        setObservedPosition(null)
-        setSelectedLine(null)
-        setAttributionMessage(null)
-        setPinStatus(null)
-        setEvaluationSource(null)
-        setObjectiveLoading(false)
-        setObjectiveFinding(null)
-        setProspectivePending(false)
+        applyComplete(event as CompleteEvent)
         return
       }
       if (isDegradationEvent(event)) {
-        setDegradation(event)
-        setWidget(null)
-        setChangeId(null)
-        setObservations(null)
-        setObservedPosition(null)
-        setLoadingKey(null)
-        setEvaluationSource(null)
-        setSourceFiles({})
-        setSelectedLine(null)
-        setAttributionMessage(null)
-        setPinStatus(null)
-        setSearchTrace([])
-        selectedTracePosition.current = null
-        replacePosition({})
-        replaceCache(new Map())
-        setError(null)
-        setObjectiveLoading(false)
-        setObjectiveFinding(null)
-        setProspectivePending(false)
+        applyDegradation(event)
         return
       }
       if (event.type === 'evaluation') {
@@ -398,7 +413,49 @@ function App() {
       setProspectivePending(false)
       setError('The WebSocket connection failed.')
     }
-  }, [putCachedObservation, replaceCache, replacePosition, rejectPendingGridResolvers])
+  }, [applyComplete, applyDegradation, putCachedObservation, replaceCache, replacePosition, rejectPendingGridResolvers])
+
+  // Load one already-persisted result by changeId — the permalink open path.
+  // Reuses applyComplete/applyDegradation (the same state transitions a live
+  // websocket 'complete'/degradation event drives) so a permalinked
+  // microworld renders through the identical widget code path, not a second
+  // one. Also used directly by the Session Ledger sidebar's onOpen.
+  const openChangeId = useCallback(async (targetChangeId: string) => {
+    try {
+      const response = await fetch(`${API_BASE}/diffs/${targetChangeId}`)
+      if (!response.ok) throw new Error(`Could not load changeId ${targetChangeId} (${response.status}).`)
+      const payload = await response.json() as CompleteEvent | DegradationEvent
+      if (payload.type === 'complete') {
+        applyComplete(payload)
+      } else if (isDegradationEvent(payload)) {
+        applyDegradation(payload)
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : `Could not open changeId ${targetChangeId}.`)
+    }
+  }, [applyComplete, applyDegradation])
+
+  // On first mount: open a changeId named in the URL (the permalink path),
+  // and load the Session Ledger sidebar's listing. Runs once; switching
+  // heroes afterward does not re-trigger either of these.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const targetChangeId = params.get('changeId')
+    if (targetChangeId) {
+      void openChangeId(targetChangeId)
+    }
+    fetch(`${API_BASE}/ledger`)
+      .then((response) => response.json())
+      .then((data: { entries?: readonly { changeId: string; thesis: string }[] }) => {
+        setLedgerEntries(
+          (data.entries ?? []).map((entry) => ({ changeId: entry.changeId, thesis: entry.thesis })),
+        )
+      })
+      .catch(() => {
+        // The ledger sidebar is a convenience listing; a failure here must
+        // not block or error out the primary hero-diff view.
+      })
+  }, [openChangeId])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -594,6 +651,10 @@ function App() {
             </button>
           ))}
         </nav>
+        <aside aria-label="Session ledger sidebar" className="space-y-2 rounded-md border border-[var(--lever-text)]/20 p-3">
+          <h2 className="text-sm font-semibold">Session Ledger</h2>
+          <SessionLedger entries={ledgerEntries} onOpen={(entryChangeId) => void openChangeId(entryChangeId)} />
+        </aside>
         <header className="space-y-2">
           <p className="text-sm font-medium text-[var(--lever-primary)]">Lever / {selectedHero.label}</p>
           <h1 className="text-3xl font-semibold">Pull on the behavioral difference</h1>
@@ -604,6 +665,15 @@ function App() {
                 ? 'Generating one executable candidate from unwritten code…'
                 : 'Preparing the verified comparison…')}
           </p>
+          {changeId !== null ? (
+            <button
+              type="button"
+              onClick={() => void navigator.clipboard.writeText(`${window.location.origin}?changeId=${changeId}`)}
+              className="rounded-md border border-[var(--lever-text)]/30 px-3 py-1.5 text-sm hover:bg-[var(--lever-surface)]"
+            >
+              Copy permalink
+            </button>
+          ) : null}
           <form onSubmit={(event) => void submitProspective(event)} className="max-w-3xl rounded-lg border border-blue-700/30 bg-blue-50 p-3 text-slate-900">
             <label htmlFor="prospective-hypothesis" className="block text-sm font-semibold">Prospective hypothesis</label>
             <p className="mt-1 text-xs">Generate one executable candidate from unwritten code, then compare it with current behavior.</p>

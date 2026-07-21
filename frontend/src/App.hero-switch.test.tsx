@@ -37,8 +37,14 @@ describe('App hero switcher', () => {
 
     render(<App />)
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
-    const [firstUrl, firstInit] = fetchMock.mock.calls[0] as [string, RequestInit]
+    // App also fetches GET /ledger for the Session Ledger sidebar on mount,
+    // so diff submissions are identified by URL rather than absolute call
+    // index/count.
+    const diffSubmissions = () =>
+      fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/diffs')) as [string, RequestInit][]
+
+    await waitFor(() => expect(diffSubmissions()).toHaveLength(1))
+    const [firstUrl, firstInit] = diffSubmissions()[0]
     expect(String(firstUrl)).toContain('/diffs')
     const firstBody = JSON.parse(String(firstInit.body)) as { id: string; base_file_path: string }
     expect(firstBody.id).toBe('hero1')
@@ -50,8 +56,8 @@ describe('App hero switcher', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Hero 3/ }))
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-    const [secondUrl, secondInit] = fetchMock.mock.calls[1] as [string, RequestInit]
+    await waitFor(() => expect(diffSubmissions()).toHaveLength(2))
+    const [secondUrl, secondInit] = diffSubmissions()[1]
     expect(String(secondUrl)).toContain('/diffs')
     const secondBody = JSON.parse(String(secondInit.body)) as { id: string; base_file_path: string }
     expect(secondBody.id).toBe('hero3')

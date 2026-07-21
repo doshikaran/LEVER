@@ -352,6 +352,11 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown changeId.")
         return persisted
 
+    @app.get("/ledger")
+    async def list_ledger() -> dict[str, Any]:
+        """List every entry the Session Ledger has durably persisted, newest first."""
+        return {"entries": repository.list_entries()}
+
     @app.post("/diffs/{change_id}/pin", response_model=PinResponse)
     async def pin_current_position(change_id: str, request: PinRequest) -> PinResponse:
         """Write a head-regression test from a position already measured in this session."""
@@ -671,6 +676,15 @@ def _terminal_payload(
         return {
             "type": "complete",
             "changeId": change_id,
+            # Top-level convenience fields for listing surfaces (the Session
+            # Ledger's GET /ledger) that display one line per entry without
+            # needing to reach into interactionSpec/provenance.
+            "thesis": result.thesis,
+            "repo": result.provenance.repoUrl,
+            # Lever has no git integration (file-path intake only); a commit
+            # concept does not exist anywhere in this system, so this stays
+            # null rather than inventing one.
+            "commit": None,
             "widgetConfig": synthesize(
                 result,
                 _synthesis_cache(position_cache),
@@ -682,6 +696,13 @@ def _terminal_payload(
     return {
         "type": result.kind,
         "changeId": change_id,
+        # Same listing-surface convenience fields as the complete branch
+        # above; a degraded run has no InteractionSpec thesis, so its
+        # human-readable degrade reason stands in for the ledger's one-line
+        # summary, and it has no repo/commit provenance at all.
+        "thesis": result.reason,
+        "repo": None,
+        "commit": None,
         "degradeReason": result.reason,
         "plainExplanation": result.plain_explanation or _default_plain_explanation(result),
         "divergenceReport": list(result.divergence_report),

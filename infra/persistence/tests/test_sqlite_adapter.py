@@ -22,3 +22,12 @@ def test_sqlite_repository_uses_wal_and_survives_reconnection(tmp_path) -> None:
     reopened = SQLiteRepository(database_path)
     assert reopened.load("change-1") == {"result": {"admitted": 6}}
     reopened.close()
+
+
+def test_list_entries_returns_metadata_without_full_payloads(tmp_path) -> None:
+    repo = SQLiteRepository(tmp_path / "ledger.db")
+    repo.save("key-1", {"changeId": "key-1", "provenance": {"repoUrl": "file:///a", "generatedAt": "2026-07-20T00:00:00Z"}, "thesis": "t1"})
+    repo.save("key-2", {"changeId": "key-2", "provenance": {"repoUrl": "file:///b", "generatedAt": "2026-07-20T01:00:00Z"}, "thesis": "t2"})
+    entries = repo.list_entries()
+    assert {entry["changeId"] for entry in entries} == {"key-1", "key-2"}
+    assert all("thesis" in entry for entry in entries)
