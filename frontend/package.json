@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "oxlint",
+    "lint": "oxlint && eslint . --config eslint.config.js",
     "preview": "vite preview",
     "test": "vitest run --environment jsdom"
   },
@@ -23,7 +23,10 @@
     "@types/node": "^24.13.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "@typescript-eslint/parser": "^8.65.0",
     "@vitejs/plugin-react": "^6.0.3",
+    "eslint": "^9.39.5",
+    "eslint-plugin-import": "^2.32.0",
     "jsdom": "^27.0.1",
     "oxlint": "^1.71.0",
     "tailwindcss": "^4.3.3",
