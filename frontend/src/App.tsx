@@ -25,14 +25,25 @@ import type {
 } from './types'
 
 const API_BASE = import.meta.env.VITE_LEVER_API_BASE ?? 'http://127.0.0.1:8765'
-const HERO_1 = {
-  base_file_path:
-    import.meta.env.VITE_HERO1_BASE_FILE_PATH ??
-    '/Users/karandoshi/Desktop/Karan Doshi/Projects/OpenAI Hackathon/lever/fixtures/hero1/base.py',
-  head_file_path:
-    import.meta.env.VITE_HERO1_HEAD_FILE_PATH ??
-    '/Users/karandoshi/Desktop/Karan Doshi/Projects/OpenAI Hackathon/lever/fixtures/hero1/head.py',
+
+type HeroConfig = Readonly<{ id: string; label: string; base_file_path: string; head_file_path: string }>
+
+function requireEnv(key: string): string {
+  const value = import.meta.env[key]
+  if (!value) {
+    throw new Error(`Missing required env var ${key} — copy frontend/.env.example to frontend/.env.local`)
+  }
+  return value
 }
+
+const HEROES: readonly HeroConfig[] = [
+  {
+    id: 'hero1',
+    label: 'Hero 1 — rate limiter',
+    base_file_path: requireEnv('VITE_HERO1_BASE_FILE_PATH'),
+    head_file_path: requireEnv('VITE_HERO1_HEAD_FILE_PATH'),
+  },
+]
 const DRAG_SETTLE_MS = 120
 
 type PendingRequest = Readonly<{ key: string; version: number; position: KnobPosition }>
@@ -102,6 +113,7 @@ function isDegradationEvent(event: { type?: unknown }): event is DegradationEven
 }
 
 function App() {
+  const selectedHero = HEROES[0]
   const position = useMicroworldStore((state) => state.position)
   const replacePosition = useMicroworldStore((state) => state.replacePosition)
   const replaceCache = useMicroworldStore((state) => state.replaceCache)
@@ -282,7 +294,7 @@ function App() {
         const response = await fetch(`${API_BASE}/diffs`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(HERO_1),
+          body: JSON.stringify(selectedHero),
           signal: controller.signal,
         })
         if (!response.ok) throw new Error(`Diff request failed (${response.status}).`)
@@ -299,7 +311,7 @@ function App() {
       controller.abort()
       socket.current?.close()
     }
-  }, [connectToChange])
+  }, [connectToChange, selectedHero])
 
   useEffect(() => {
     if (widget === null || degradation !== null || Object.keys(position).length === 0) return
@@ -415,7 +427,7 @@ function App() {
       const response = await fetch(`${API_BASE}/prospective`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ base_file_path: HERO_1.base_file_path, hypothesis }),
+        body: JSON.stringify({ base_file_path: selectedHero.base_file_path, hypothesis }),
       })
       if (!response.ok) throw new Error(`Prospective request failed (${response.status}).`)
       const { changeId: prospectiveChangeId } = await response.json() as { changeId: string }
@@ -425,7 +437,7 @@ function App() {
       setProspectivePending(false)
       setError(reason instanceof Error ? reason.message : 'Could not start prospective analysis.')
     }
-  }, [connectToChange, hypothesis])
+  }, [connectToChange, hypothesis, selectedHero])
 
   return (
     <main className="min-h-screen bg-[var(--lever-background)] px-6 py-6 text-[var(--lever-text)]">
