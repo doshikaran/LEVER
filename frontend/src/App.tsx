@@ -169,10 +169,15 @@ function App() {
   const [selectedHeroId, setSelectedHeroId] = useState(HEROES[0].id)
   const selectedHero = HEROES.find((hero) => hero.id === selectedHeroId) ?? HEROES[0]
   // Computed once, from the URL present at the moment this component first
-  // mounted — never re-read on later renders. Used solely to decide whether
-  // the *very first* run of the default-hero-diff effect below should be
-  // suppressed in favor of the permalink load (see hasSuppressedInitialHeroRun).
+  // mounted — never re-read on later renders. Used together with
+  // hasUserSelectedHero below to decide whether the default-hero-diff effect's
+  // automatic kickoff should be suppressed in favor of the permalink load.
   const [hadChangeIdOnMount] = useState(() => new URLSearchParams(window.location.search).has('changeId'))
+  // Set to true only inside the hero switcher's onClick handler (never inside
+  // the diff-generation effect itself), so its value is immune to being
+  // mutated by that effect's own execution — see the effect below for why
+  // that property matters under StrictMode's double-invoked effects.
+  const [hasUserSelectedHero, setHasUserSelectedHero] = useState(false)
   const position = useMicroworldStore((state) => state.position)
   const replacePosition = useMicroworldStore((state) => state.replacePosition)
   const replaceCache = useMicroworldStore((state) => state.replaceCache)
@@ -204,12 +209,6 @@ function App() {
   const positionVersion = useRef(0)
   const dragSettleTimer = useRef<number | undefined>(undefined)
   const selectedTracePosition = useRef<KnobPosition | null>(null)
-  // Tracks whether the default-hero-diff effect below is about to run for the
-  // very first time. Flipped to false the first time that effect runs, and
-  // never reset — so only that first run can ever be suppressed by
-  // hadChangeIdOnMount; any later run (e.g. the user switching heroes via the
-  // Task 4 switcher) always proceeds normally regardless of the URL.
-  const isFirstHeroEffectRun = useRef(true)
 
   const evaluatePosition = useCallback(async (nextPosition: KnobPosition, version: number) => {
     // A new input invalidates a prior source selection immediately.  Do this
@@ -469,18 +468,25 @@ function App() {
   }, [openChangeId])
 
   useEffect(() => {
-    const isInitialRun = isFirstHeroEffectRun.current
-    isFirstHeroEffectRun.current = false
-
     // A permalink (?changeId=... at initial mount) is being loaded by the
     // effect above via a fast REST fetch. Generating a fresh hero-1 diff is
     // realistically much slower (real LLM/adversary-search pipeline), so if
     // both ran unconditionally the permalinked widget would render first and
     // then be silently overwritten seconds later when hero-1's pipeline
-    // finally completes. Skip *only* this automatic, unrequested initial
-    // kickoff — any later run of this effect (the user clicking a different
-    // hero button) is unaffected and behaves exactly as before.
-    if (isInitialRun && hadChangeIdOnMount) {
+    // finally completes. Skip the automatic, unrequested kickoff for as long
+    // as a permalink was present at mount AND the user has not yet explicitly
+    // picked a hero via the switcher below.
+    //
+    // Both operands of this guard are stable across React StrictMode's
+    // simulated (setup → cleanup → setup) double-invoke of this effect in
+    // development: hadChangeIdOnMount is a useState value computed once from
+    // a lazy initializer (React guarantees useState initializers run only
+    // once per mount, regardless of StrictMode), and hasUserSelectedHero is
+    // only ever set from the hero switcher's onClick handler — never from
+    // inside this effect's own body. So neither value changes as a side
+    // effect of this effect running, which is what a "first run" ref
+    // (the previous, StrictMode-broken implementation) could not guarantee.
+    if (hadChangeIdOnMount && !hasUserSelectedHero) {
       return
     }
 
@@ -533,7 +539,7 @@ function App() {
       rejectPendingGridResolvers('Hero changed before this position could be evaluated')
       socket.current?.close()
     }
-  }, [connectToChange, selectedHeroId, selectedHero, replaceCache, replacePosition, rejectPendingGridResolvers, hadChangeIdOnMount])
+  }, [connectToChange, selectedHeroId, selectedHero, replaceCache, replacePosition, rejectPendingGridResolvers, hadChangeIdOnMount, hasUserSelectedHero])
 
   useEffect(() => {
     if (widget === null || degradation !== null || Object.keys(position).length === 0) return
@@ -670,7 +676,10 @@ function App() {
               key={hero.id}
               type="button"
               aria-pressed={hero.id === selectedHeroId}
-              onClick={() => setSelectedHeroId(hero.id)}
+              onClick={() => {
+                setHasUserSelectedHero(true)
+                setSelectedHeroId(hero.id)
+              }}
               className="rounded-md border border-[var(--lever-text)]/30 px-3 py-1.5 text-sm aria-pressed:border-[var(--lever-primary)] aria-pressed:bg-[var(--lever-primary)] aria-pressed:text-[var(--lever-surface)]"
             >
               {hero.label}
