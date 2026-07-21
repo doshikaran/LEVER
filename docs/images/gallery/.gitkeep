@@ -1,0 +1,20 @@
+Drop webapp screenshots here (any names). I recommend a number prefix so they
+sort in the order you want in the README, and a short hyphenated title that
+becomes the caption:
+
+  01-paste-a-pr.png
+  02-search-fog.png
+  03-throughput-arena.png
+  04-permission-matrix.png
+  05-decision-tree.png
+  06-timeline-scrubber.png
+  07-time-travel-diff.png
+  08-break-the-pr.png
+  09-trading-card.png
+  10-receipt-duel.png
+  11-degradation-card.png
+  12-session-ledger.png
+  ... up to ~15
+
+Then tell me "go" and I'll auto-generate the gallery grid in README.md
+from whatever files are in this folder.
