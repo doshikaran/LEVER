@@ -6,6 +6,7 @@ import json
 import math
 import os
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,9 +18,10 @@ from domain import orchestrator
 from domain.adversary import Adversary, AdversaryResult, CacheEntry, TracePoint
 from domain.fidelity_verifier import FidelityVerification
 from domain.harness_engineer import HarnessEngineer
+from domain.intake import CheckoutHandle, InvalidPullRequestUrl, ResolvedPullRequest
 from domain.line_attribution import trace_attribution
 from domain.orchestrator import DegradeResult, GracefulDegradation
-from domain.ports import LLMClient, Repository, SandboxRuntime
+from domain.ports import DualCheckout, LLMClient, PullRequestResolver, Repository, SandboxRuntime
 from domain.pin_as_test import write_pinned_head_test
 from domain.prospective import CandidateGenerationError, generate_candidate
 from domain.schema import (
@@ -33,6 +35,8 @@ from domain.schema import (
 )
 from domain.scout import scout
 from domain.synthesizer import synthesize
+from infra.checkout.dual_checkout import DualCheckoutError, GitDualCheckout
+from infra.github.pr_resolver import GitHubPullRequestResolver, PullRequestResolveError
 from infra.llm.openai_adapter import OpenAIAdapter
 from infra.parsing.tree_sitter_adapter import TreeSitterPythonParser
 from infra.persistence.sqlite_adapter import SQLiteRepository
@@ -47,17 +51,73 @@ DEFAULT_SESSION_DATABASE_PATH = Path(
 DEFAULT_PROSPECTIVE_CANDIDATE_DIRECTORY = Path(
     os.getenv("LEVER_PROSPECTIVE_CANDIDATES", "data/prospective-candidates")
 )
+DEFAULT_CHECKOUT_ROOT = Path(
+    os.getenv("LEVER_CHECKOUT_ROOT", "data/checkouts")
+)
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HERO_FIXTURES: dict[str, tuple[Path, Path]] = {
     "hero1": (
         _PROJECT_ROOT / "fixtures/hero1/base.py",
         _PROJECT_ROOT / "fixtures/hero1/head.py",
     ),
+    "hero2": (
+        _PROJECT_ROOT / "fixtures/hero2/base.py",
+        _PROJECT_ROOT / "fixtures/hero2/head.py",
+    ),
+    "hero3": (
+        _PROJECT_ROOT / "fixtures/hero3/base.py",
+        _PROJECT_ROOT / "fixtures/hero3/head.py",
+    ),
     "hero4": (
         _PROJECT_ROOT / "fixtures/hero4/base.py",
         _PROJECT_ROOT / "fixtures/hero4/head.py",
     ),
+    "state-workflow": (
+        _PROJECT_ROOT / "fixtures/state_workflow/base.py",
+        _PROJECT_ROOT / "fixtures/state_workflow/head.py",
+    ),
+    "wild-synth": (
+        _PROJECT_ROOT / "fixtures/wild_synth/base.py",
+        _PROJECT_ROOT / "fixtures/wild_synth/head.py",
+    ),
 }
+DEMO_CATALOG: tuple[dict[str, str], ...] = (
+    {
+        "id": "hero1",
+        "label": "Hero 1 · Rate limiter",
+        "description": "Fixed window → sliding window with per-tenant burst.",
+    },
+    {
+        "id": "hero2",
+        "label": "Hero 2 · Retry jitter",
+        "description": "Exponential backoff → full jitter (thundering herd).",
+    },
+    {
+        "id": "hero3",
+        "label": "Hero 3 · Permissions",
+        "description": "Role table → attribute inheritance matrix.",
+    },
+    {
+        "id": "hero4",
+        "label": "Hero 4 · Decision tree",
+        "description": "Flat discount checks → nested feature-flag paths.",
+    },
+    {
+        "id": "state-workflow",
+        "label": "State workflow",
+        "description": "Order machine with a resubmit recovery path.",
+    },
+    {
+        "id": "wild-synth",
+        "label": "Wild synth",
+        "description": "Unregistered plain callable — generative harness path.",
+    },
+    {
+        "id": "compose-hero1",
+        "label": "Compose 2×2",
+        "description": "Hero 1 A×B composition with measured AB corner.",
+    },
+)
 
 ProgressCallback = Callable[[str, str], None]
 AdversaryCallback = Callable[[AdversaryResult], None]
@@ -102,10 +162,35 @@ class ProspectiveRequest(BaseModel):
     hypothesis: str = Field(min_length=1, max_length=4_000)
 
 
+class PullRequestIntakeRequest(BaseModel):
+    """A GitHub pull request URL that Lever should resolve and dual-checkout."""
+
+    url: str = Field(min_length=8, max_length=500)
+
+
 class DiffAccepted(BaseModel):
     """The immediate response returned before asynchronous analysis begins."""
 
     changeId: str
+
+
+class DemoInfo(BaseModel):
+    """One curated demo chip exposed to the browser intake shell."""
+
+    id: str
+    label: str
+    description: str
+
+
+class SessionSummary(BaseModel):
+    """One row in the durable session ledger for permalink browsing."""
+
+    changeId: str
+    outcome: str
+    title: str
+    savedAt: str | None = None
+    fidelityBand: str | None = None
+    speculative: bool = False
 
 
 class EvaluationRequest(BaseModel):
@@ -192,12 +277,16 @@ def create_app(
     pinned_tests_dir: str | Path | None = None,
     prospective_candidate_dir: str | Path | None = None,
     prospective_pipeline_runner: PipelineRunner | None = None,
+    pr_resolver: PullRequestResolver | None = None,
+    dual_checkout: DualCheckout | None = None,
+    checkout_root: str | Path | None = None,
     model: str = DEFAULT_MODEL,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
 ) -> FastAPI:
     """Create an API app whose only retained state is the current process's runs."""
     runtime_factory = runtime_factory or E2BSandboxRuntime
     llm_factory = llm_factory or _openai_client
+    injected_pipeline_runner = pipeline_runner
     pipeline_runner = pipeline_runner or _run_pipeline_with_callbacks
     evaluation_runner = evaluation_runner or _evaluate_position
     repository = repository or SQLiteRepository(database_path or DEFAULT_SESSION_DATABASE_PATH)
@@ -208,11 +297,14 @@ def create_app(
     prospective_pipeline_runner = (
         prospective_pipeline_runner or _run_prospective_pipeline_with_callbacks
     )
+    pr_resolver = pr_resolver or GitHubPullRequestResolver()
+    dual_checkout = dual_checkout or GitDualCheckout()
+    checkout_root = Path(checkout_root or DEFAULT_CHECKOUT_ROOT)
     app = FastAPI(title="Lever interface")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
-        allow_methods=["POST"],
+        allow_methods=["GET", "POST"],
         allow_headers=["content-type"],
     )
     runs: dict[str, _RunState] = {}
@@ -220,7 +312,122 @@ def create_app(
     app.state.repository = repository
     app.state.pinned_tests_dir = pinned_tests_dir
     app.state.prospective_candidate_dir = prospective_candidate_dir
+    app.state.checkout_root = checkout_root
 
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        """Liveness probe for local demo scripts and deploy checks."""
+        return {"status": "ok", "phase": "F"}
+
+    @app.get("/demos", response_model=list[DemoInfo])
+    async def list_demos() -> list[DemoInfo]:
+        """Return curated hero chips so the browser never hardcodes fixture paths."""
+        return [DemoInfo.model_validate(item) for item in DEMO_CATALOG]
+
+    @app.get("/sessions", response_model=list[SessionSummary])
+    async def list_sessions(limit: int = 40) -> list[SessionSummary]:
+        """List recent persisted microworlds for the session ledger UI."""
+        summaries: list[SessionSummary] = []
+        for key in repository.list_keys(limit=max(1, min(limit, 200))):
+            if key.startswith("hero:"):
+                continue
+            payload = repository.load(key)
+            if not isinstance(payload, dict):
+                continue
+            summaries.append(_session_summary(key, payload))
+        return summaries
+
+    @app.get("/compose/demos/hero1")
+    async def compose_hero1_demo() -> dict[str, Any]:
+        """Return the measured Hero 1 2×2 composition (AB is executed, never inferred)."""
+        try:
+            return _hero1_composed_payload(runtime_factory())
+        except Exception as error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"{type(error).__name__}: {error}",
+            ) from error
+
+    @app.post(
+        "/demos/{demo_id}/run",
+        response_model=DiffAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def run_demo(demo_id: str) -> DiffAccepted:
+        """Start an async pipeline on a curated hero fixture (product demo path)."""
+        if demo_id == "compose-hero1":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Use GET /compose/demos/hero1 for the composed 2×2 demo.",
+            )
+        fixture_paths = HERO_FIXTURES.get(demo_id)
+        if fixture_paths is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown demoId.")
+        base_path, head_path = fixture_paths
+        change_id = _request_change_id(base_path, head_path)
+        existing = runs.get(change_id)
+        if existing is None:
+            state = _RunState(change_id=change_id, base_path=base_path, head_path=head_path)
+            runs[change_id] = state
+            state.task = asyncio.create_task(
+                _run_in_background(
+                    state,
+                    base_path,
+                    head_path,
+                    runtime_factory,
+                    llm_factory,
+                    pipeline_runner,
+                    repository,
+                    model,
+                    reasoning_effort,
+                ),
+                name=f"lever-demo-{demo_id}-{change_id[:12]}",
+            )
+        return DiffAccepted(changeId=change_id)
+
+    @app.post("/prs", response_model=DiffAccepted, status_code=status.HTTP_202_ACCEPTED)
+    async def create_pull_request(request: PullRequestIntakeRequest) -> DiffAccepted:
+        """Resolve a GitHub PR, dual-checkout it, then reuse the existing pipeline."""
+        try:
+            resolved = pr_resolver.resolve(request.url.strip())
+        except InvalidPullRequestUrl as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+        except PullRequestResolveError as error:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=str(error),
+            ) from error
+
+        change_id = _pr_change_id(resolved)
+        if change_id in runs:
+            return DiffAccepted(changeId=change_id)
+
+        work_root = checkout_root / change_id
+        state = _RunState(
+            change_id=change_id,
+            base_path=work_root / "base",
+            head_path=work_root / "head",
+        )
+        runs[change_id] = state
+        state.task = asyncio.create_task(
+            _run_pr_in_background(
+                state,
+                resolved,
+                work_root,
+                dual_checkout,
+                runtime_factory,
+                llm_factory,
+                injected_pipeline_runner,
+                repository,
+                model,
+                reasoning_effort,
+            ),
+            name=f"lever-pr-{change_id[:12]}",
+        )
+        return DiffAccepted(changeId=change_id)
     @app.post("/diffs", response_model=DiffAccepted, status_code=status.HTTP_202_ACCEPTED)
     async def create_diff(request: DiffRequest) -> DiffAccepted:
         """Accept a diff and schedule the full blocking pipeline without delaying HTTP."""
@@ -234,40 +441,23 @@ def create_app(
                 head_path=head_path,
             )
             runs[change_id] = state
-            if _executable_reference_path(request, base_path, head_path) is None:
-                _persist_terminal(
+            # Phase B: readable base/head files are enough. Direct reference programs are
+            # generated beside the harness (registry or generative IR). A tests/ tree is
+            # an optional boost, not a hard gate.
+            state.task = asyncio.create_task(
+                _run_in_background(
                     state,
+                    base_path,
+                    head_path,
+                    runtime_factory,
+                    llm_factory,
+                    pipeline_runner,
                     repository,
-                    _terminal_payload(
-                        change_id,
-                        GracefulDegradation(
-                            "No executable reference path or test suite was found; Lever "
-                            "cannot independently compare harness output to real behavior.",
-                            plain_explanation=(
-                                "The repository has no executable reference for this behavior. "
-                                "Manually test the changed path in its owning application before "
-                                "trusting any comparison."
-                            ),
-                        ),
-                        {},
-                        _source_files(base_path, head_path),
-                    ),
-                )
-            else:
-                state.task = asyncio.create_task(
-                    _run_in_background(
-                        state,
-                        base_path,
-                        head_path,
-                        runtime_factory,
-                        llm_factory,
-                        pipeline_runner,
-                        repository,
-                        model,
-                        reasoning_effort,
-                    ),
-                    name=f"lever-pipeline-{change_id[:12]}",
-                )
+                    model,
+                    reasoning_effort,
+                ),
+                name=f"lever-pipeline-{change_id[:12]}",
+            )
         return DiffAccepted(changeId=change_id)
 
     @app.post("/diffs/raw", response_model=DiffAccepted, status_code=status.HTTP_202_ACCEPTED)
@@ -347,11 +537,11 @@ def create_app(
     @app.post("/diffs/{change_id}/pin", response_model=PinResponse)
     async def pin_current_position(change_id: str, request: PinRequest) -> PinResponse:
         """Write a head-regression test from a position already measured in this session."""
-        state = runs.get(change_id)
+        state = _ensure_active_run(change_id, runs, repository)
         if state is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Pinning requires an active Lever session for this changeId.",
+                detail="Pinning requires a persisted or active Lever session for this changeId.",
             )
         if not state.completed or state.spec is None:
             raise HTTPException(
@@ -416,7 +606,7 @@ def create_app(
     async def diff_events(websocket: WebSocket, change_id: str) -> None:
         """Stream pipeline stages, then serve on-demand uncached-position evaluations."""
         await websocket.accept()
-        state = runs.get(change_id)
+        state = _ensure_active_run(change_id, runs, repository)
         if state is None:
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
@@ -525,6 +715,124 @@ async def _run_in_background(
             state.position_cache,
             _source_files(state.base_path, state.head_path),
         ),
+    )
+
+
+async def _run_pr_in_background(
+    state: _RunState,
+    resolved: ResolvedPullRequest,
+    work_root: Path,
+    dual_checkout: DualCheckout,
+    runtime_factory: Callable[[], SandboxRuntime],
+    llm_factory: Callable[[str, str], LLMClient],
+    injected_pipeline_runner: PipelineRunner | None,
+    repository: Repository,
+    model: str,
+    reasoning_effort: str,
+) -> None:
+    """Materialize base/head trees, then reuse the standard async pipeline worker."""
+    state.add_progress(
+        "resolving",
+        f"Resolved {resolved.owner}/{resolved.repo}#{resolved.number}: {resolved.title}",
+    )
+    try:
+        checkout = await asyncio.to_thread(dual_checkout.materialize, resolved, work_root)
+    except DualCheckoutError as error:
+        _persist_terminal(
+            state,
+            repository,
+            _terminal_payload(
+                state.change_id,
+                GracefulDegradation(
+                    f"Dual checkout failed: {error}",
+                    plain_explanation=(
+                        "Lever could not materialize base and head trees for this pull request. "
+                        "Confirm the repository is cloneable and retry."
+                    ),
+                ),
+                {},
+                None,
+            ),
+        )
+        return
+
+    if checkout.primary_base_file is None or checkout.primary_head_file is None:
+        _persist_terminal(
+            state,
+            repository,
+            _terminal_payload(
+                state.change_id,
+                GracefulDegradation(
+                    checkout.selection_reason
+                    or "No shared Python module was available on both base and head.",
+                    plain_explanation=(
+                        f"{resolved.title} changed files, but Lever Phase A needs one shared "
+                        "Python module present on both sides of the PR before it can verify."
+                    ),
+                ),
+                {},
+                None,
+            ),
+        )
+        return
+
+    if checkout.selection_reason:
+        state.add_progress("primary_pair", checkout.selection_reason)
+    state.base_path = checkout.primary_base_file
+    state.head_path = checkout.primary_head_file
+
+    def pr_aware_runner(
+        base_file_path: str,
+        head_file_path: str,
+        sandbox: SandboxRuntime,
+        llm: LLMClient,
+        runner_model: str,
+        runner_effort: str,
+        progress_callback: ProgressCallback,
+        adversary_callback: AdversaryCallback,
+        search_trace_callback: SearchTraceCallback,
+    ) -> InteractionSpec | DegradeResult:
+        """Tests inject a runner; production preserves PR SHAs in provenance."""
+        if injected_pipeline_runner is not None:
+            return injected_pipeline_runner(
+                base_file_path,
+                head_file_path,
+                sandbox,
+                llm,
+                runner_model,
+                runner_effort,
+                progress_callback,
+                adversary_callback,
+                search_trace_callback,
+            )
+        return orchestrator.run_pipeline(
+            base_file_path,
+            head_file_path,
+            sandbox,
+            llm,
+            runner_model,
+            runner_effort,
+            progress_callback=progress_callback,
+            adversary_callback=adversary_callback,
+            search_trace_callback=search_trace_callback,
+            repo_provenance=orchestrator.RepoProvenance(
+                repo_url=resolved.repo_url,
+                base_sha=resolved.base_sha,
+                head_sha=resolved.head_sha,
+            ),
+            files_touched_count=max(1, len(resolved.changed_files)),
+        )
+
+    await _run_in_background(
+        state,
+        state.base_path,
+        state.head_path,
+        runtime_factory,
+        llm_factory,
+        pr_aware_runner,
+        repository,
+        model,
+        reasoning_effort,
     )
 
 
@@ -652,6 +960,75 @@ def _persist_terminal(
     state.finish(payload)
 
 
+def _session_summary(change_id: str, payload: dict[str, Any]) -> SessionSummary:
+    """Compress a persisted terminal payload into one ledger row."""
+    outcome = str(payload.get("type") or payload.get("outcome") or "unknown")
+    widget = payload.get("widgetConfig") if isinstance(payload.get("widgetConfig"), dict) else {}
+    title = str(
+        payload.get("title")
+        or widget.get("thesis")
+        or payload.get("degradeReason")
+        or change_id
+    )
+    return SessionSummary(
+        changeId=change_id,
+        outcome=outcome,
+        title=title[:160],
+        savedAt=payload.get("savedAt") if isinstance(payload.get("savedAt"), str) else None,
+        fidelityBand=widget.get("fidelityBand") if isinstance(widget.get("fidelityBand"), str) else None,
+        speculative=bool(widget.get("speculative", False)),
+    )
+
+
+def _ensure_active_run(
+    change_id: str,
+    runs: dict[str, _RunState],
+    repository: Repository,
+) -> _RunState | None:
+    """Return an in-memory run, rehydrating a completed permalink from SQLite when needed."""
+    existing = runs.get(change_id)
+    if existing is not None:
+        return existing
+    persisted = repository.load(change_id)
+    if not isinstance(persisted, dict):
+        return None
+    rehydrated = _rehydrate_run(change_id, persisted)
+    if rehydrated is None:
+        return None
+    runs[change_id] = rehydrated
+    return rehydrated
+
+
+def _rehydrate_run(change_id: str, payload: dict[str, Any]) -> _RunState | None:
+    """Rebuild a completed _RunState so pin / evaluate / objective work after process restart."""
+    source_files = payload.get("sourceFiles") if isinstance(payload.get("sourceFiles"), dict) else {}
+    base_meta = source_files.get("base") if isinstance(source_files.get("base"), dict) else {}
+    head_meta = source_files.get("head") if isinstance(source_files.get("head"), dict) else {}
+    base_path = Path(
+        str(payload.get("basePath") or base_meta.get("path") or f"<missing-base:{change_id}>")
+    )
+    head_path = Path(
+        str(payload.get("headPath") or head_meta.get("path") or f"<missing-head:{change_id}>")
+    )
+    state = _RunState(change_id=change_id, base_path=base_path, head_path=head_path)
+    cache = payload.get("positionCache")
+    if isinstance(cache, dict):
+        state.position_cache = {
+            str(key): value for key, value in cache.items() if isinstance(value, dict)
+        }
+    if payload.get("type") == "complete":
+        raw_spec = payload.get("interactionSpec")
+        if not isinstance(raw_spec, dict):
+            return None
+        try:
+            state.spec = InteractionSpec.model_validate(raw_spec)
+        except Exception:
+            return None
+    state.events.append(payload)
+    state.completed = True
+    return state
+
+
 def _terminal_payload(
     change_id: str,
     result: InteractionSpec | DegradeResult,
@@ -659,17 +1036,24 @@ def _terminal_payload(
     source_files: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Serialize every terminal state into one persistence and presentation payload."""
+    saved_at = datetime.now(timezone.utc).isoformat()
     if isinstance(result, InteractionSpec):
+        widget = synthesize(
+            result,
+            _synthesis_cache(position_cache),
+        ).model_dump(mode="json")
         return {
             "type": "complete",
             "changeId": change_id,
-            "widgetConfig": synthesize(
-                result,
-                _synthesis_cache(position_cache),
-            ).model_dump(mode="json"),
+            "widgetConfig": widget,
             "positionCache": position_cache,
             "sourceFiles": source_files or {},
             "interactionSpec": result.model_dump(mode="json"),
+            "savedAt": saved_at,
+            "title": result.thesis,
+            "outcome": "complete",
+            "basePath": str(source_files["base"]["path"]) if source_files and "base" in source_files else None,
+            "headPath": str(source_files["head"]["path"]) if source_files and "head" in source_files else None,
         }
     return {
         "type": result.kind,
@@ -683,6 +1067,10 @@ def _terminal_payload(
         "proposedSpecs": list(result.proposedSpecs),
         "outcome": asdict(result),
         "positionCache": position_cache,
+        "savedAt": saved_at,
+        "title": result.reason[:140],
+        "manualTestRecipe": _manual_test_recipe(result),
+        "staticNotes": _static_notes(result),
     }
 
 
@@ -696,6 +1084,54 @@ def _default_plain_explanation(result: DegradeResult) -> str:
         return "The modeled inputs did not reveal a behavioral difference; manually test the boundary case you care about."
     return "Lever could not make a faithful model, so manually test the changed path in the real application."
 
+
+def _manual_test_recipe(result: DegradeResult) -> list[str]:
+    """Build 1–3 concrete manual inputs from measured mismatches or a generic probe."""
+    recipe: list[str] = []
+    for entry in result.divergence_report[:3]:
+        if not isinstance(entry, dict):
+            continue
+        position = entry.get("position")
+        observable = entry.get("observable", "the observable")
+        recipe.append(
+            f"Run the changed entry point with input {json.dumps(position, sort_keys=True)} "
+            f"and compare `{observable}` between base and head."
+        )
+    if not recipe:
+        recipe.append(
+            "Exercise the changed callable with one representative production input and "
+            "compare base vs head side effects."
+        )
+    if result.kind == "unscopable":
+        recipe.insert(
+            0,
+            "Drive the live framework request/session object through the changed view or handler.",
+        )
+    return recipe[:3]
+
+
+def _static_notes(result: DegradeResult) -> list[str]:
+    """Optional unverified static notes — always labeled as non-empirical."""
+    notes: list[str] = [
+        "UNVERIFIED STATIC NOTE: These notes are not a microworld and must not be treated as measured behavior.",
+    ]
+    if result.proposedSpecs:
+        theses = [
+            str(spec.get("thesis"))
+            for spec in result.proposedSpecs
+            if isinstance(spec, dict) and spec.get("thesis")
+        ]
+        if theses:
+            notes.append(
+                "Delta Analyst drafted "
+                + "; ".join(f"“{thesis}”" for thesis in theses[:2])
+                + " — draft only, never verified."
+            )
+    if result.kind == "unscopable":
+        notes.append(
+            "Scout classified the entry point as needing a live framework object."
+        )
+    return notes
 
 def _cache_from_adversary(result: AdversaryResult) -> dict[str, dict[str, Any]]:
     """Convert the retained search cache into the JSON payload served to clients."""
@@ -1192,6 +1628,149 @@ def _source_files(base_path: Path, head_path: Path) -> dict[str, dict[str, str]]
     }
 
 
+def _hero1_composed_payload(runtime: SandboxRuntime) -> dict[str, Any]:
+    """Build the curated Hero 1 composition demo from the four fixture modules."""
+    from domain.composed_microworld import (
+        CompositionCheckout,
+        build_composed_harnesses,
+        compose_widget_config,
+        evaluate_composed_position,
+    )
+    from domain.schema import (
+        AstNodeRef,
+        ConfigBinding,
+        CounterExtractor,
+        DependencyLedger,
+        DriverBinding,
+        EntryPoint,
+        Knob,
+        KnobPosition,
+        NumericDomain,
+        Observable,
+        PartialInteractionSpec,
+        ScopedChangeSet,
+    )
+
+    fixture_dir = _PROJECT_ROOT / "fixtures" / "hero1"
+    # Stage under /tmp so E2B can mkdir the tree (host /Users/... paths fail remotely).
+    sandbox_modules = Path("/tmp/lever-compose-hero1")
+    sandbox_modules.mkdir(parents=True, exist_ok=True)
+    modules = {
+        "base.py": (fixture_dir / "base.py").read_text(encoding="utf-8"),
+        "a.py": (fixture_dir / "head.py").read_text(encoding="utf-8"),
+        "b.py": (fixture_dir / "limit_head.py").read_text(encoding="utf-8"),
+        "ab.py": (fixture_dir / "combined.py").read_text(encoding="utf-8"),
+    }
+    for name, source in modules.items():
+        (sandbox_modules / name).write_text(source, encoding="utf-8")
+    checkout = CompositionCheckout(
+        base_module_path=str(sandbox_modules / "base.py"),
+        a_module_path=str(sandbox_modules / "a.py"),
+        b_module_path=str(sandbox_modules / "b.py"),
+        ab_module_path=str(sandbox_modules / "ab.py"),
+        base_source=modules["base.py"],
+        a_source=modules["a.py"],
+        b_source=modules["b.py"],
+        ab_source=modules["ab.py"],
+    )
+    scope = ScopedChangeSet(
+        entry_point=EntryPoint(
+            file=str(sandbox_modules / "a.py"),
+            fn="RateLimiter.admit",
+            signature="RateLimiter.admit(self, tenant_id: str, now: float) -> bool",
+        ),
+        changed_nodes=[
+            AstNodeRef(
+                kind="function_definition",
+                name="RateLimiter.admit",
+                start_byte=0,
+                end_byte=100,
+            )
+        ],
+        dependency_ledger=DependencyLedger(),
+    )
+    spec = PartialInteractionSpec(
+        thesis="Compare the independent limit and tenant-window changes together.",
+        domainPack="rate-limiter",
+        knobs=[
+            Knob(
+                id="limit_per_sec",
+                label="limit",
+                binding=ConfigBinding(kind="config", path="limit_per_sec"),
+                type="integer",
+                domain=NumericDomain(min=1, max=100, step=1),
+                default=5,
+                scale="linear",
+                unit="requests/s",
+            ),
+            Knob(
+                id="burst",
+                label="burst",
+                binding=ConfigBinding(kind="config", path="burst"),
+                type="integer",
+                domain=NumericDomain(min=0, max=50, step=1),
+                default=0,
+                scale="linear",
+                unit="requests",
+            ),
+            Knob(
+                id="rps",
+                label="rps",
+                binding=DriverBinding(kind="driver", param="rps"),
+                type="integer",
+                domain=NumericDomain(min=1, max=100, step=1),
+                default=6,
+                scale="linear",
+                unit="requests/s",
+            ),
+            Knob(
+                id="tenants",
+                label="tenants",
+                binding=DriverBinding(kind="driver", param="tenants"),
+                type="integer",
+                domain=NumericDomain(min=1, max=16, step=1),
+                default=2,
+                scale="linear",
+                unit="tenants",
+            ),
+        ],
+        observables=[
+            Observable(
+                id="admitted",
+                label="admitted",
+                extractor=CounterExtractor(kind="counter", name="admitted"),
+                render="timeseries",
+                unit="requests",
+                compareMode="overlay",
+            )
+        ],
+    )
+    harnesses = build_composed_harnesses(scope, spec, checkout)
+    # Use the same host-matched template as the main pipeline. A bespoke
+    # "compose-hero1" E2B template is not published; inventing one 404s.
+    sandbox_id = runtime.create_sandbox(os.getenv("LEVER_SANDBOX_TEMPLATE", "base"))
+    try:
+        point = KnobPosition({"limit_per_sec": 5, "burst": 0, "rps": 6, "tenants": 2})
+        evaluated = evaluate_composed_position(
+            runtime, sandbox_id, harnesses, point, "admitted", tolerance=0.01
+        )
+    finally:
+        runtime.kill_sandbox(sandbox_id)
+    widget = compose_widget_config(
+        "hero1-tenant-windows",
+        "hero1-raised-limit",
+        spec,
+        point,
+        evaluated.effect,
+    )
+    return {
+        "type": "composed",
+        "changeId": "compose-hero1",
+        "composedWidgetConfig": widget.model_dump(mode="json"),
+        "symmetristPassed": harnesses.symmetrist.passed,
+    }
+
+
 def _validated_paths(request: DiffRequest) -> tuple[Path, Path]:
     """Require two readable local files before admitting a background job."""
     base_path = Path(request.base_file_path).expanduser().resolve()
@@ -1245,6 +1824,40 @@ def _request_change_id(base_path: Path, head_path: Path) -> str:
 def _raw_diff_change_id(raw_diff: str) -> str:
     """Give a context-free raw diff a stable permalink ID without pretending it is runnable."""
     return hashlib.sha256(f"raw-diff\0{raw_diff}".encode("utf-8")).hexdigest()
+
+
+def _pr_change_id(resolved: ResolvedPullRequest) -> str:
+    """Stable id for one owner/repo/number @ base/head SHA pair."""
+    material = (
+        f"pr\0{resolved.owner}/{resolved.repo}#{resolved.number}\0"
+        f"{resolved.base_sha}\0{resolved.head_sha}"
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _fixture_has_executable_reference(base_path: Path, head_path: Path) -> bool:
+    """Hero fixtures ship a sibling tests/ directory as their executable reference."""
+    return _directory_has_python_tests(base_path.parent / "tests") or _directory_has_python_tests(
+        head_path.parent / "tests"
+    )
+
+
+def _checkout_has_executable_reference(checkout: CheckoutHandle) -> bool:
+    """Accept conventional tests/ trees under either checkout root or beside the primary file."""
+    candidates = [
+        checkout.head_root / "tests",
+        checkout.base_root / "tests",
+    ]
+    if checkout.primary_head_file is not None:
+        candidates.append(checkout.primary_head_file.parent / "tests")
+        candidates.append(checkout.primary_head_file.parent.parent / "tests")
+    if checkout.primary_base_file is not None:
+        candidates.append(checkout.primary_base_file.parent / "tests")
+    return any(_directory_has_python_tests(path) for path in candidates)
+
+
+def _directory_has_python_tests(directory: Path) -> bool:
+    return directory.is_dir() and any(directory.glob("*.py"))
 
 
 def _prospective_change_id(base_path: Path, hypothesis: str) -> str:

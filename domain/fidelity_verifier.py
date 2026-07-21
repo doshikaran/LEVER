@@ -13,8 +13,9 @@ from scipy.stats import qmc
 
 from domain.entry_point_registry import ReferenceProgramRequest, get_entry_point_template
 from domain.harness_engineer import HarnessPair
+from domain.harness_ir import render_reference_program
 from domain.line_attribution import trace_attribution
-from domain.ports import SandboxRuntime
+from domain.ports import SandboxExecutionError, SandboxRuntime
 from domain.schema import (
     Agreement,
     Coverage,
@@ -335,6 +336,7 @@ class FidelityVerifier:
                         partial_spec.knobs,
                         partial_spec.observables,
                         scoped_change_set,
+                        generative_ir=harness_pair.generative_ir,
                     ),
                     "differential suite",
                 )
@@ -479,9 +481,18 @@ def _reference_command(
     scoped_change_set: ScopedChangeSet,
     point: dict[str, Any],
     seed: int | str,
+    generative_ir: Any | None = None,
 ) -> str:
     """Run the real module directly with duplicated driver logic, never a harness import."""
-    return _reference_program(module_path, knobs, observables, scoped_change_set, point, seed) + (
+    return _reference_program(
+        module_path,
+        knobs,
+        observables,
+        scoped_change_set,
+        point,
+        seed,
+        generative_ir=generative_ir,
+    ) + (
         "\nprint(json.dumps({\"observations\": OBSERVATIONS}, sort_keys=True))\n"
     )
 
@@ -493,26 +504,37 @@ def _reference_program(
     scoped_change_set: ScopedChangeSet,
     point: dict[str, Any],
     seed: int | str,
+    generative_ir: Any | None = None,
 ) -> str:
     """Return the direct-real-code program with its observation kept in memory."""
     entry_point = scoped_change_set.entry_point
     if entry_point is None:
         raise ValueError("Independent reference execution requires a scoped entry point")
     template = get_entry_point_template(entry_point.fn)
-    if template is None:
-        raise ValueError(
-            f"no harness template registered for this entry-point shape: {entry_point.fn}"
+    if template is not None:
+        program = template.reference_program(
+            ReferenceProgramRequest(
+                module_path=module_path,
+                knobs=knobs,
+                observables=observables,
+                point=point,
+                seed=seed,
+            )
         )
-    program = template.reference_program(
-        ReferenceProgramRequest(
+        return _with_reference_branch_trace(program, observables)
+    if generative_ir is not None:
+        program = render_reference_program(
+            generative_ir,
             module_path=module_path,
             knobs=knobs,
             observables=observables,
             point=point,
             seed=seed,
         )
+        return _with_reference_branch_trace(program, observables)
+    raise ValueError(
+        f"no harness template or generative IR available for entry-point shape: {entry_point.fn}"
     )
-    return _with_reference_branch_trace(program, observables)
 
 
 def _with_reference_branch_trace(program: str, observables: list[Observable]) -> str:
@@ -554,14 +576,27 @@ def _differential_bundle_command(
     knobs: list[Knob],
     observables: list[Observable],
     scoped_change_set: ScopedChangeSet,
+    generative_ir: Any | None = None,
 ) -> str:
     """Evaluate all four independent differential paths in one sandbox command."""
     reference_programs = {
         "reference_base": _reference_program(
-            paths["reference_base"], knobs, observables, scoped_change_set, point, 0
+            paths["reference_base"],
+            knobs,
+            observables,
+            scoped_change_set,
+            point,
+            0,
+            generative_ir=generative_ir,
         ),
         "reference_head": _reference_program(
-            paths["reference_head"], knobs, observables, scoped_change_set, point, 0
+            paths["reference_head"],
+            knobs,
+            observables,
+            scoped_change_set,
+            point,
+            0,
+            generative_ir=generative_ir,
         ),
     }
     return _bundle_program(
@@ -582,15 +617,28 @@ def _differential_suite_command(
     knobs: list[Knob],
     observables: list[Observable],
     scoped_change_set: ScopedChangeSet,
+    generative_ir: Any | None = None,
 ) -> str:
     """Run all 128 four-way comparisons in one already-warm sandbox command."""
     reference_programs = [
         {
             "base": _reference_program(
-                paths["reference_base"], knobs, observables, scoped_change_set, point, 0
+                paths["reference_base"],
+                knobs,
+                observables,
+                scoped_change_set,
+                point,
+                0,
+                generative_ir=generative_ir,
             ),
             "head": _reference_program(
-                paths["reference_head"], knobs, observables, scoped_change_set, point, 0
+                paths["reference_head"],
+                knobs,
+                observables,
+                scoped_change_set,
+                point,
+                0,
+                generative_ir=generative_ir,
             ),
         }
         for point in points
@@ -748,7 +796,7 @@ def _run_bundle(
     """Execute and parse a bundled program, surfacing a useful port-level error."""
     result = runtime.run_code(sandbox_id, code)
     if result["exit_code"] != 0:
-        raise RuntimeError(f"{description} failed: {result['stderr']}")
+        raise SandboxExecutionError(f"{description} failed: {result['stderr']}")
     parsed = json.loads(result["stdout"])
     if not isinstance(parsed, dict):
         raise TypeError(f"{description} did not return a JSON object")
@@ -771,7 +819,7 @@ def _write_source(runtime: SandboxRuntime, sandbox_id: str, path: str, source: s
     )
     result = runtime.run_code(sandbox_id, code)
     if result["exit_code"] != 0:
-        raise RuntimeError(f"Could not stage {path}: {result['stderr']}")
+        raise SandboxExecutionError(f"Could not stage {path}: {result['stderr']}")
 
 
 def _harness_stub_config(source: str, pair: HarnessPair) -> dict[str, Any]:

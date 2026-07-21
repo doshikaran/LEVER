@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useMicroworldStore } from './store/useMicroworldStore'
 import type { DegradationEvent } from './types'
@@ -89,17 +89,31 @@ describe('App degradation routing', () => {
     cleanup()
     vi.unstubAllGlobals()
     useMicroworldStore.setState({ position: {}, cache: new Map() })
+    window.history.replaceState({}, '', '/')
   })
 
   it.each(terminals)('$fixture: chartCount=0, controlCount=0', async (terminal) => {
     activeTerminal = { ...activeTerminal, ...terminal }
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ changeId: activeTerminal.changeId }),
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/demos') && !url.includes('/run')) {
+        return {
+          ok: true,
+          json: async () => [{ id: 'hero1', label: 'Hero 1 · Rate limiter', description: 'demo' }],
+        }
+      }
+      if (url.endsWith('/sessions')) {
+        return { ok: true, json: async () => [] }
+      }
+      return {
+        ok: true,
+        json: async () => ({ changeId: activeTerminal.changeId }),
+      }
     }))
     vi.stubGlobal('WebSocket', DegradationSocket)
 
     render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Hero 1 · Rate limiter' }))
 
     await waitFor(() => expect(screen.getByTestId('degradation-panel')).toBeTruthy())
     expect(screen.getByText(activeTerminal.degradeReason)).toBeTruthy()

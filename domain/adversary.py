@@ -11,7 +11,7 @@ from scipy.stats import qmc
 from domain.fidelity_verifier import FidelityVerification, sobol_points
 from domain.harness_engineer import HarnessPair
 from domain.line_attribution import trace_attribution
-from domain.ports import SandboxRuntime
+from domain.ports import SandboxExecutionError, SandboxRuntime
 from domain.schema import (
     InteractionSpec,
     AdversaryObjective,
@@ -540,7 +540,7 @@ print(json.dumps({{"base": base, "head": head}}, sort_keys=True))
 """
             result = self._runtime.run_code(sandbox_id, code)
             if result["exit_code"] != 0:
-                raise RuntimeError(f"Adversary harness execution failed: {result['stderr']}")
+                raise SandboxExecutionError(f"Adversary harness execution failed: {result['stderr']}")
             payload = json.loads(result["stdout"])
             return ObservationBundle(
                 base=payload["base"]["observations"],
@@ -575,7 +575,7 @@ print(json.dumps(output, sort_keys=True))
 """
             result = self._runtime.run_code(sandbox_id, code)
             if result["exit_code"] != 0:
-                raise RuntimeError(f"Adversary harness batch failed: {result['stderr']}")
+                raise SandboxExecutionError(f"Adversary harness batch failed: {result['stderr']}")
             payload = json.loads(result["stdout"])
             return [
                 ObservationBundle(
@@ -968,7 +968,7 @@ def _write_source(runtime: SandboxRuntime, sandbox_id: str, path: str, source: s
     )
     result = runtime.run_code(sandbox_id, code)
     if result["exit_code"] != 0:
-        raise RuntimeError(f"Could not stage {path}: {result['stderr']}")
+        raise SandboxExecutionError(f"Could not stage {path}: {result['stderr']}")
 
 
 __all__ = [

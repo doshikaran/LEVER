@@ -7,6 +7,7 @@ from domain.adversary import AdversaryResult
 from domain.fidelity_verifier import FidelityVerification
 from domain.harness_engineer import HarnessEngineer as RealHarnessEngineer
 from domain.line_attribution import UninstrumentableReferenceError
+from domain.ports import SandboxExecutionError
 from domain.schema import (
     Agreement,
     Coverage,
@@ -379,8 +380,10 @@ def test_loop_b_terminal_inert_retains_each_delta_proposal(monkeypatch) -> None:
     ]
 
 
-def test_unregistered_entry_point_returns_graceful_degradation_without_execution(monkeypatch) -> None:
-    """Unsupported shapes stop at Harness Engineer before a harness or reference runs."""
+def test_unregistered_entry_point_uses_generative_path_instead_of_registry_hard_gate(
+    monkeypatch,
+) -> None:
+    """Unknown shapes attempt generative IR; registry miss is no longer a hard stop."""
     unregistered_scope = ScopedChangeSet(
         entry_point=EntryPoint(
             file=str(FIXTURE_DIR / "head.py"),
@@ -392,6 +395,17 @@ def test_unregistered_entry_point_returns_graceful_degradation_without_execution
     runtime = FakeSandboxRuntime()
     llm = FakeLLMClient([_valid_response()])
     monkeypatch.setattr(orchestrator, "scout", lambda *args: unregistered_scope)
+    attempts: list[int] = []
+
+    class GenerativeFailingHarnessEngineer:
+        def generate(self, *_args, **_kwargs):
+            attempts.append(1)
+            raise orchestrator.GenerativeHarnessError(
+                "generative harness could not be built for this entry-point shape: "
+                "FutureLimiter.evaluate: unsupported dependency surface"
+            )
+
+    monkeypatch.setattr(orchestrator, "HarnessEngineer", GenerativeFailingHarnessEngineer)
 
     result = orchestrator.run_pipeline(
         str(FIXTURE_DIR / "base.py"),
@@ -403,9 +417,10 @@ def test_unregistered_entry_point_returns_graceful_degradation_without_execution
     )
 
     assert isinstance(result, orchestrator.GracefulDegradation)
-    assert result.reason == "no harness template registered for this entry-point shape"
+    assert "generative harness could not be built" in result.reason
+    assert result.reason != "no harness template registered for this entry-point shape"
+    assert len(attempts) == 3
     assert runtime.created_templates == ["base"]
-    assert len(llm.prompts) == 1
     assert not runtime.run_calls
 
 
@@ -512,3 +527,34 @@ def test_registry_incompatibility_kicks_back_to_delta_analyst_once(monkeypatch) 
     assert len(llm.prompts) == 2
     assert "registered template for 'can' expects a permission matrix" in llm.prompts[1]
     assert "A previous proposal was schema-valid but Lever could not execute it" in llm.prompts[1]
+
+
+def test_sandbox_syntax_failure_degrades_honestly_instead_of_crashing(monkeypatch) -> None:
+    """A sandbox import/syntax failure becomes a version-aware degrade, not a 500."""
+    _counting_harness(monkeypatch)
+
+    class ExplodingVerifier:
+        def __init__(self, runtime):
+            pass
+
+        def verify(self, *args, **kwargs):
+            raise SandboxExecutionError(
+                "differential suite failed:   File \"/tmp/lever-pipeline/base.py\", "
+                "line 305\n    raise RuntimeError(f'{d} failed: {result['stderr']}')\n"
+                "SyntaxError: f-string: unmatched '['"
+            )
+
+    monkeypatch.setattr(orchestrator, "FidelityVerifier", ExplodingVerifier)
+    result = orchestrator.run_pipeline(
+        str(FIXTURE_DIR / "base.py"),
+        str(FIXTURE_DIR / "head.py"),
+        FakeSandboxRuntime(),
+        FakeLLMClient([_valid_response()]),
+        "fake-model",
+        "low",
+    )
+
+    assert isinstance(result, orchestrator.GracefulDegradation)
+    assert "sandbox" in result.reason.lower()
+    assert "LEVER_SANDBOX_TEMPLATE" in result.reason
+    assert result.plain_explanation is not None

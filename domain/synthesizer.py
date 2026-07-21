@@ -11,6 +11,7 @@ from domain.schema import (
     NamedPosition,
     SurpriseMarker,
 )
+from domain.world_director import WorldSpec, build_world_spec
 
 
 class ControlDescriptor(BaseModel):
@@ -32,7 +33,7 @@ class ChartDescriptor(BaseModel):
 
     observableId: str
     label: str
-    render: Literal["timeseries", "matrixCell", "scalar"]
+    render: Literal["timeseries", "matrixCell", "scalar", "nodeState"]
     compareMode: Literal["overlay", "delta", "ratio"]
     unit: str | None
     yAxisZeroAnchored: Literal[True] = True
@@ -62,11 +63,14 @@ class UnionTreeDescriptor(BaseModel):
 class WidgetConfig(BaseModel):
     """Plain serializable data the frontend needs to render an honest widget."""
 
-    domainPack: Literal["rate-limiter", "permission", "numeric-fn", "decision-tree"]
+    domainPack: Literal[
+        "rate-limiter", "permission", "numeric-fn", "decision-tree", "state-machine"
+    ]
     thesis: str
     controls: list[ControlDescriptor]
     charts: list[ChartDescriptor]
     unionTree: UnionTreeDescriptor | None = None
+    worldSpec: WorldSpec
     initialPosition: KnobPosition
     surpriseMarker: SurpriseMarker | None
     presets: list[NamedPosition]
@@ -89,6 +93,7 @@ def synthesize(
         DomainPackId.PERMISSION,
         DomainPackId.NUMERIC_FN,
         DomainPackId.DECISION_TREE,
+        DomainPackId.STATE_MACHINE,
     }
     if spec.domainPack not in supported_packs:
         raise NotImplementedError(
@@ -131,6 +136,7 @@ def synthesize(
             )
         ]),
         unionTree=union_tree,
+        worldSpec=build_world_spec(spec),
         initialPosition=spec.initialPosition,
         surpriseMarker=spec.surpriseMarker,
         presets=list(spec.presets or []),
@@ -161,7 +167,8 @@ def _validate_supported_pack(
         raise ValueError("numeric-fn requires a scalar observable")
     if spec.domainPack is DomainPackId.DECISION_TREE and render != "pathTrace":
         raise ValueError("decision-tree requires a pathTrace observable")
-
+    if spec.domainPack is DomainPackId.STATE_MACHINE and render != "nodeState":
+        raise ValueError("state-machine requires a nodeState observable")
 
 def _union_tree(
     observable_id: str,
@@ -259,5 +266,6 @@ __all__ = [
     "UnionTreeDescriptor",
     "UnionTreeNode",
     "WidgetConfig",
+    "WorldSpec",
     "synthesize",
 ]

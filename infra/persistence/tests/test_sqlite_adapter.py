@@ -14,6 +14,8 @@ def test_sqlite_repository_uses_wal_and_survives_reconnection(tmp_path) -> None:
     assert isinstance(repository, Repository)
     repository.save("change-1", {"result": {"admitted": 6}})
     assert repository.load("change-1") == {"result": {"admitted": 6}}
+    repository.save("change-2", {"result": {"admitted": 9}})
+    assert repository.list_keys(limit=10) == ["change-2", "change-1"]
     repository.close()
 
     with sqlite3.connect(database_path) as connection:

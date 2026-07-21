@@ -11,6 +11,7 @@ from __future__ import annotations
 import difflib
 import json
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Mapping
 
 from domain.harness_engineer import HarnessArtifact, HarnessEngineer, HarnessPair
@@ -150,9 +151,17 @@ def evaluate_composed_position(
 
     observations: dict[str, dict[str, Any]] = {}
     for variant in VARIANTS:
+        artifact = harnesses.artifacts[variant]
+        # Stage the target module into the sandbox. FakeSandbox can import host
+        # fixture paths directly; E2B cannot — without this write the harness
+        # dies with FileNotFoundError on MODULE_PATH.
+        module_source = artifact.instrumented_module_source
+        if module_source is None:
+            module_source = Path(artifact.entry_module).read_text(encoding="utf-8")
+        _stage_source(runtime, sandbox_id, artifact.entry_module, module_source)
         result = runtime.run_code(
             sandbox_id,
-            _run_program(harnesses.artifacts[variant].source, position.root, seed),
+            _run_program(artifact.source, position.root, seed),
         )
         if result["exit_code"] != 0:
             raise RuntimeError(
@@ -331,6 +340,19 @@ def _normalise_module_path(source: str) -> str:
         "MODULE_PATH = __MODULE_PATH__\n" if line.startswith("MODULE_PATH = ") else line
         for line in source.splitlines(keepends=True)
     )
+
+
+def _stage_source(runtime: SandboxRuntime, sandbox_id: str, path: str, source: str) -> None:
+    """Write one module into the sandbox so MODULE_PATH imports succeed remotely."""
+    code = (
+        "from pathlib import Path\n"
+        f"target = Path({path!r})\n"
+        "target.parent.mkdir(parents=True, exist_ok=True)\n"
+        f"target.write_text({source!r})"
+    )
+    result = runtime.run_code(sandbox_id, code)
+    if result["exit_code"] != 0:
+        raise RuntimeError(f"Could not stage {path}: {result['stderr']}")
 
 
 def _run_program(source: str, position: dict[str, Any], seed: int) -> str:

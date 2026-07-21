@@ -1,16 +1,27 @@
 @import "tailwindcss";
 
 :root {
-  --lever-background: #F5F0E6;
-  --lever-surface: #FBF8F1;
-  --lever-text: #2C2620;
-  --lever-primary: #7A2E2E;
-  --lever-secondary: #4A5A2E;
-  --lever-warning: #B8631B;
+  /* Cool crystalline light — not beige, not purple */
+  --lever-background: #eef3f8;
+  --lever-surface: #ffffff;
+  --lever-text: #0b1220;
+  --lever-muted: #5b6577;
+  --lever-primary: #0d6e6a;
+  --lever-primary-strong: #085652;
+  --lever-secondary: #1d4ed8;
+  --lever-warning: #c2410c;
+  --lever-glow: rgba(13, 110, 106, 0.18);
+  --lever-mesh-a: rgba(29, 78, 216, 0.09);
+  --lever-mesh-b: rgba(13, 110, 106, 0.12);
+  --lever-mesh-c: rgba(14, 165, 233, 0.08);
 
-  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --font-display: "Syne", "Avenir Next", sans-serif;
+  --font-body: "Outfit", "Helvetica Neue", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  font-family: var(--font-body);
   color: var(--lever-text);
-  background: var(--lever-background);
+  background-color: var(--lever-background);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -21,13 +32,276 @@ body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
-  background: var(--lever-background);
+  background:
+    radial-gradient(ellipse 80% 55% at 8% -10%, var(--lever-mesh-b), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 92% 0%, var(--lever-mesh-a), transparent 50%),
+    radial-gradient(ellipse 60% 40% at 50% 100%, var(--lever-mesh-c), transparent 55%),
+    linear-gradient(180deg, #f7fafc 0%, var(--lever-background) 40%, #e8eef6 100%);
+  background-attachment: fixed;
 }
 
 #root {
   min-height: 100vh;
 }
 
+h1,
+h2,
+.lever-brand,
+.font-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.03em;
+}
+
+input,
+button,
+select,
+textarea {
+  font-family: var(--font-body);
+}
+
+code,
+.font-mono {
+  font-family: var(--font-mono);
+}
+
 input[type='range'] {
   accent-color: var(--lever-primary);
+  cursor: pointer;
+}
+
+/* Tailwind v4's preflight drops the default pointer cursor on interactive
+   elements. Restore it everywhere it's expected so nothing feels dead. */
+button,
+[role='button'],
+[role='tab'],
+[role='option'],
+[role='switch'],
+summary,
+label[for],
+select,
+a[href],
+.recharts-wrapper,
+.recharts-surface {
+  cursor: pointer;
+}
+
+button:disabled,
+[role='button'][aria-disabled='true'],
+[disabled] {
+  cursor: not-allowed;
+}
+
+/* ——— Motion system ——— */
+
+@keyframes lever-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes lever-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes lever-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes lever-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--lever-glow);
+  }
+  50% {
+    box-shadow: 0 0 0 10px transparent;
+  }
+}
+
+@keyframes lever-progress-in {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes arena-rise {
+  0% {
+    transform: translate(-50%, 40px);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-50%, -140px);
+    opacity: 0.15;
+  }
+}
+
+@keyframes arena-surprise-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(194, 65, 12, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 10px rgba(194, 65, 12, 0);
+  }
+}
+
+@keyframes boss-celebrate {
+  0% {
+    transform: scale(0.96);
+    opacity: 0.4;
+  }
+  60% {
+    transform: scale(1.02);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-rise {
+  animation: lever-rise 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-rise-delay-1 {
+  animation: lever-rise 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.08s both;
+}
+
+.animate-rise-delay-2 {
+  animation: lever-rise 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.16s both;
+}
+
+.animate-fade {
+  animation: lever-fade 0.4s ease both;
+}
+
+.progress-item {
+  animation: lever-progress-in 0.35s ease both;
+}
+
+.lever-panel {
+  background: color-mix(in srgb, var(--lever-surface) 92%, transparent);
+  backdrop-filter: blur(12px);
+  border: 1px solid color-mix(in srgb, var(--lever-secondary) 14%, transparent);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.8) inset,
+    0 12px 40px rgba(15, 23, 42, 0.06);
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+}
+
+.lever-panel:hover {
+  border-color: color-mix(in srgb, var(--lever-primary) 28%, transparent);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 16px 48px rgba(15, 23, 42, 0.08);
+}
+
+.lever-btn {
+  transition: transform 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+
+.lever-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px var(--lever-glow);
+}
+
+.lever-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.lever-btn-primary {
+  background: linear-gradient(135deg, var(--lever-primary) 0%, var(--lever-primary-strong) 100%);
+  color: white;
+}
+
+.lever-btn-primary:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.lever-chip {
+  transition: transform 0.2s ease, background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+.lever-chip:hover:not(:disabled) {
+  transform: translateY(-2px);
+}
+
+.lever-input {
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.lever-input:focus {
+  outline: none;
+  border-color: var(--lever-primary);
+  box-shadow: 0 0 0 3px var(--lever-glow);
+}
+
+.lever-shimmer {
+  background: linear-gradient(
+    110deg,
+    transparent 20%,
+    rgba(255, 255, 255, 0.55) 40%,
+    transparent 60%
+  );
+  background-size: 200% 100%;
+  animation: lever-shimmer 2.4s linear infinite;
+}
+
+.lever-breathe {
+  animation: lever-breathe 2.8s ease-in-out infinite;
+}
+
+.arena-particle {
+  animation: arena-rise 1.6s ease-out infinite;
+}
+
+.arena-surprise-pulse {
+  animation: arena-surprise-pulse 1.4s ease-out infinite;
+}
+
+.boss-celebrate {
+  animation: boss-celebrate 0.55s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise,
+  .animate-rise-delay-1,
+  .animate-rise-delay-2,
+  .animate-fade,
+  .progress-item,
+  .arena-particle,
+  .arena-surprise-pulse,
+  .boss-celebrate,
+  .lever-shimmer,
+  .lever-breathe {
+    animation: none !important;
+  }
+
+  .lever-btn:hover:not(:disabled),
+  .lever-chip:hover:not(:disabled) {
+    transform: none;
+  }
 }

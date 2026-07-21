@@ -171,3 +171,7 @@ def test_synthesizer_can_render_hero3_permission_and_numeric_fallback_contracts(
         assert widget.domainPack == expected_pack
         assert widget.charts[0].render == expected_render
         assert widget.charts[0].yAxisZeroAnchored is True
+        if expected_pack == "permission":
+            assert widget.worldSpec.genre == "access-matrix"
+        if expected_pack == "numeric-fn":
+            assert widget.worldSpec.genre == "numeric-response"

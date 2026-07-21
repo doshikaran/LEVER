@@ -39,6 +39,20 @@ class SQLiteRepository:
             ).fetchone()
         return None if row is None else json.loads(row[0])
 
+    def list_keys(self, *, limit: int = 50) -> list[str]:
+        """Return recent session keys; SQLite rowid order approximates insertion order."""
+        capped = max(1, min(int(limit), 500))
+        with self._lock:
+            rows = self._connect().execute(
+                """
+                SELECT key FROM repository_entries
+                ORDER BY rowid DESC
+                LIMIT ?
+                """,
+                (capped,),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
     def close(self) -> None:
         """Close this adapter's database connection without deleting persisted sessions."""
         with self._lock:

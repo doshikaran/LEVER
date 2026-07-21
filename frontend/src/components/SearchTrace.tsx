@@ -70,11 +70,11 @@ export function SearchTrace({ points, controls, onSelectPosition }: SearchTraceP
   return (
     <section
       aria-label="Live adversary search trace"
-      className="rounded-lg border border-[var(--lever-text)]/20 bg-[var(--lever-surface)] p-4 shadow-sm"
+      className="lever-panel rounded-2xl p-4 shadow-sm"
     >
       <header className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div>
-          <h2 className="text-base font-semibold text-[var(--lever-text)]">Search trace</h2>
+          <h2 className="text-base font-semibold text-[var(--lever-text)]">Search fog</h2>
           <p className="text-sm text-[var(--lever-text)]">
             {points.length} sampled positions · {exploreCount} Sobol · {exploitCount} ascent
           </p>

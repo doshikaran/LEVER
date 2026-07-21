@@ -25,6 +25,13 @@ const complete: CompleteEvent = {
       scale: 'linear', unit: 'requests/s', axisRole: null,
     }],
     charts: [{ observableId: 'admitted', label: 'Admitted', render: 'timeseries', compareMode: 'overlay', unit: 'requests', yAxisZeroAnchored: true }],
+    worldSpec: {
+      genre: 'throughput',
+      stage: { kind: 'arena', layout: 'full-bleed' },
+      affordances: ['particles', 'evidence-chart', 'fog-of-war'],
+      narrationLine: 'Measured search trace.',
+      playHints: ['Drag load until the gates diverge.'],
+    },
     initialPosition: { rps: 3 },
     surpriseMarker: null,
     presets: [],
@@ -72,17 +79,29 @@ describe('App Search Trace cache-forward lookup', () => {
     vi.unstubAllGlobals()
     SearchTraceSocket.sent.mockReset()
     useMicroworldStore.setState({ position: {}, cache: new Map() })
+    window.history.replaceState({}, '', '/')
   })
 
   it('moves to a streamed point using the existing memoized position cache', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ changeId: complete.changeId }),
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/demos') && !url.includes('/run')) {
+        return {
+          ok: true,
+          json: async () => [{ id: 'hero1', label: 'Hero 1 · Rate limiter', description: 'demo' }],
+        }
+      }
+      if (url.endsWith('/sessions')) {
+        return { ok: true, json: async () => [] }
+      }
+      return { ok: true, json: async () => ({ changeId: complete.changeId }) }
     }))
     vi.stubGlobal('WebSocket', SearchTraceSocket)
 
     render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Hero 1 · Rate limiter' }))
 
+    fireEvent.click(await screen.findByTestId('toggle-detailed'))
     await waitFor(() => expect(screen.getAllByTestId('search-trace-point')).toHaveLength(2))
     fireEvent.click(screen.getAllByTestId('search-trace-point')[1])
 
