@@ -1,0 +1,15 @@
+flowchart TD
+    Intake[Diff Intake] --> Triager{Triager Gate}
+    Triager -->|SKIP| Skipped[Skipped: force-proceed available]
+    Triager -->|PROCEED / forced| Scout[Scout: scope + entry point]
+    Scout -->|unscopable| Degraded1[Graceful Degradation]
+    Scout --> DeltaAnalyst[Delta Analyst: thesis + spec draft]
+    DeltaAnalyst --> HarnessEngineer[Harness Engineer: dual harness]
+    HarnessEngineer -->|"attempt 1-3, escalating strategy"| FidelityVerifier[Fidelity Verifier: Symmetrist + Assayer]
+    FidelityVerifier -->|"Loop A: Symmetrist FAIL or agreement < 0.85"| HarnessEngineer
+    FidelityVerifier -->|"attempts exhausted or low confidence band"| Degraded2[Graceful Degradation]
+    FidelityVerifier -->|verified| Adversary[Adversary: divergence search]
+    Adversary -->|"Loop B: max D < epsilon, 1 kickback"| DeltaAnalyst
+    Adversary -->|"kickback exhausted"| Inert[Inert Result: behaviorally inert]
+    Adversary -->|"spec complete"| Synthesizer[Synthesizer: mechanical render]
+    Synthesizer --> Widget[Playable Microworld]

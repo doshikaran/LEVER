@@ -142,6 +142,23 @@ lets `App.tsx` import successfully at all.
 
 ---
 
+## Architecture
+
+![Lever pipeline architecture](docs/architecture.svg)
+
+The diagram above traces `docs/SPEC.md` Part 5's End-to-End Trigger Map:
+Diff Intake through the Triager Gate, Scout's scoping, Delta Analyst's
+thesis/spec draft, Harness Engineer's dual harness, the Fidelity Verifier's
+Symmetrist + Assayer checks, the Adversary's divergence search, and the
+Synthesizer's mechanical render into a Playable Microworld — including
+Loop A (Harness Engineer ↔ Fidelity Verifier), Loop B (Adversary → Delta
+Analyst), and the terminal Graceful Degradation / Inert Result paths.
+Source: [`docs/architecture.mmd`](docs/architecture.mmd). See
+[docs/SPEC.md](docs/SPEC.md) for the full agent roster, guardrails, and
+orchestration semantics.
+
+---
+
 ## Measured arbitrary-diff hit rate
 
 `docs/SPEC.md`'s honesty clause on arbitrary diffs states plainly: *"Expected
