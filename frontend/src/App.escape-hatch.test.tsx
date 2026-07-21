@@ -102,20 +102,24 @@ describe('App escape hatch', () => {
   })
 
   it('pins the exact already-cached position instead of sending observations from the browser', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ changeId: complete.changeId }),
-      })
-      // App also fetches GET /ledger for the Session Ledger sidebar on mount.
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ entries: [] }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ testPath: '/repo/pinned_tests/test_lever_trace.py' }),
-      })
+    // Matched by URL rather than call order: applyComplete now invalidates
+    // the ['ledger'] query on completion (Session Ledger auto-refresh fix),
+    // so GET /ledger can fire more than once (mount + post-completion
+    // refetch) — a positional mockResolvedValueOnce queue would let that
+    // extra call silently consume the slot meant for POST /pin.
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/diffs')) {
+        return { ok: true, json: async () => ({ changeId: complete.changeId }) }
+      }
+      if (url.includes('/ledger')) {
+        return { ok: true, json: async () => ({ entries: [] }) }
+      }
+      if (url.includes('/pin')) {
+        return { ok: true, json: async () => ({ testPath: '/repo/pinned_tests/test_lever_trace.py' }) }
+      }
+      throw new Error(`Unexpected fetch in escape-hatch pin test: ${url}`)
+    })
     vi.stubGlobal('fetch', fetchMock)
     vi.stubGlobal('WebSocket', TraceSocket)
 

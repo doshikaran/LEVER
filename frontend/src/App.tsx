@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { MicroworldCanvas, ProspectiveCandidateRow } from './components/MicroworldCanvas'
 import type { ProspectiveCandidateView } from './components/MicroworldCanvas'
 import { KnobPanel } from './components/KnobPanel'
@@ -205,6 +205,7 @@ function App() {
   const [objectiveFinding, setObjectiveFinding] = useState<string | null>(null)
   const [hypothesis, setHypothesis] = useState('')
   const [prospectivePending, setProspectivePending] = useState(false)
+  const queryClient = useQueryClient()
   const ledgerQuery = useQuery({
     queryKey: ['ledger'],
     queryFn: async () => {
@@ -307,6 +308,9 @@ function App() {
   // 'complete'/degradation event, rather than a second, possibly-inconsistent
   // rendering path.
   const applyComplete = useCallback((complete: CompleteEvent) => {
+    // This run just became a new (or updated) Session Ledger entry — refetch
+    // so the sidebar shows it without requiring a manual page reload.
+    void queryClient.invalidateQueries({ queryKey: ['ledger'] })
     replaceCache(new Map(Object.entries(complete.positionCache)))
     replacePosition(selectedTracePosition.current ?? complete.widgetConfig.initialPosition)
     setDegradation(null)
@@ -322,7 +326,7 @@ function App() {
     setObjectiveLoading(false)
     setObjectiveFinding(null)
     setProspectivePending(false)
-  }, [replaceCache, replacePosition])
+  }, [queryClient, replaceCache, replacePosition])
 
   // Spec §6.2: 3 independently-generated, independently-verified candidates
   // rendered together against the current baseline, not 1. Each candidate
@@ -331,6 +335,8 @@ function App() {
   // them can render through the verified-only branch MicroworldCanvas uses
   // for real diffs.
   const applyProspectiveComplete = useCallback((complete: ProspectiveCompleteEvent) => {
+    // Same reasoning as applyComplete above: a new ledger entry now exists.
+    void queryClient.invalidateQueries({ queryKey: ['ledger'] })
     setDegradation(null)
     setWidget(null)
     setProspectiveCandidates(complete.candidates)
@@ -344,9 +350,12 @@ function App() {
     setObjectiveLoading(false)
     setObjectiveFinding(null)
     setProspectivePending(false)
-  }, [])
+  }, [queryClient])
 
   const applyDegradation = useCallback((event: DegradationEvent) => {
+    // A degraded run is still persisted to the Session Ledger (with its
+    // degrade reason standing in for a thesis), so it also needs a refetch.
+    void queryClient.invalidateQueries({ queryKey: ['ledger'] })
     setDegradation(event)
     setWidget(null)
     setProspectiveCandidates(null)
@@ -367,7 +376,7 @@ function App() {
     setObjectiveLoading(false)
     setObjectiveFinding(null)
     setProspectivePending(false)
-  }, [replaceCache, replacePosition])
+  }, [queryClient, replaceCache, replacePosition])
 
   const connectToChange = useCallback((nextChangeId: string) => {
     rejectPendingGridResolvers('The evaluation connection was replaced before this position could be evaluated.')
