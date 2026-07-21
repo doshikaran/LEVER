@@ -3,6 +3,7 @@
 from pathlib import Path
 import hashlib
 import json
+import re
 import subprocess
 import sys
 
@@ -35,6 +36,28 @@ from infra.fakes.fake_sandbox import FakeSandboxRuntime
 
 
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "hero1"
+
+
+def _normalize_harness_for_hashing(source: str) -> str:
+    """Remove path-dependent content for stable cross-checkout hashing.
+
+    Generated harnesses and reference programs embed absolute filesystem paths.
+    To make hash assertions independent of checkout location, normalize these
+    paths before computing the hash.
+    """
+    # Normalize MODULE_PATH assignments
+    normalized = re.sub(
+        r'MODULE_PATH\s*=\s*"[^"]*"',
+        'MODULE_PATH = "<normalized>"',
+        source
+    )
+    # Normalize spec_from_file_location paths
+    normalized = re.sub(
+        r'spec_from_file_location\([^,]+,\s*\'[^\']*\'',
+        'spec_from_file_location("<normalized>", "<normalized>"',
+        normalized
+    )
+    return normalized
 
 
 def _hero_scope() -> ScopedChangeSet:
@@ -194,11 +217,11 @@ def test_generated_hero1_harnesses_execute_the_real_fixture_modules() -> None:
     assert json.loads(base.stdout)["observations"] == {"admitted": 5}
     assert json.loads(head.stdout)["observations"] == {"admitted": 6}
     assert get_entry_point_template("RateLimiter.admit") is not None
-    assert hashlib.sha256(pair.harness_a.source.encode()).hexdigest() == (
-        "f20b6b9d91e7192ee1551dc7ba14514c651371ac7fe1dc6cb8763a13e1c38827"
+    assert hashlib.sha256(_normalize_harness_for_hashing(pair.harness_a.source).encode()).hexdigest() == (
+        "84235b90d5514a630a3c3cfce787932fecc02e7b3f5f59850b2214a1f7634cd4"
     )
-    assert hashlib.sha256(pair.harness_b.source.encode()).hexdigest() == (
-        "785804fd4885073d905781a8521a0e3c89e1f843c0255abfdb3d7eb902ddd898"
+    assert hashlib.sha256(_normalize_harness_for_hashing(pair.harness_b.source).encode()).hexdigest() == (
+        "84235b90d5514a630a3c3cfce787932fecc02e7b3f5f59850b2214a1f7634cd4"
     )
     reference = _reference_program(
         str(FIXTURE_DIR / "head.py"),
@@ -208,8 +231,8 @@ def test_generated_hero1_harnesses_execute_the_real_fixture_modules() -> None:
         {"limit_per_sec": 5, "burst": 2, "rps": 3, "tenants": 2},
         0,
     )
-    assert hashlib.sha256(reference.encode()).hexdigest() == (
-        "ac14a94b4503f3c8ec3312620344aa8a32659104513627922e3b4da1d7ea19b2"
+    assert hashlib.sha256(_normalize_harness_for_hashing(reference).encode()).hexdigest() == (
+        "d9bf0d0eeeb5cde6ca28c53aa1da210e9fc7ec65dc4094eb7efe686c2961bf78"
     )
 
 
